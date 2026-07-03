@@ -6,7 +6,7 @@
 // reflects a consistent view of the map.
 #![allow(clippy::significant_drop_tightening)]
 
-use std::collections::BTreeMap;
+use std::collections::{btree_map, BTreeMap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -63,19 +63,30 @@ impl Registry {
     /// Register a reader for `key`, creating the device entry if new.
     pub fn acquire(&self, key: &str, name: &str) {
         let mut inner = self.inner.lock().unwrap();
-        let entry = inner.entry(key.to_string()).or_insert_with(|| Entry {
-            snapshot: DeviceSnapshot {
-                key: key.to_string(),
-                name: name.to_string(),
-                connected: false,
-                battery: None,
-                last_updated: None,
-            },
-            last_seen: None,
-            refs: 0,
-        });
-        entry.refs += 1;
-        self.publish(&inner);
+        let inserted = match inner.entry(key.to_string()) {
+            // Nothing visible changes on a ref bump.
+            btree_map::Entry::Occupied(mut o) => {
+                o.get_mut().refs += 1;
+                false
+            }
+            btree_map::Entry::Vacant(v) => {
+                v.insert(Entry {
+                    snapshot: DeviceSnapshot {
+                        key: key.to_string(),
+                        name: name.to_string(),
+                        connected: false,
+                        battery: None,
+                        last_updated: None,
+                    },
+                    last_seen: None,
+                    refs: 1,
+                });
+                true
+            }
+        };
+        if inserted {
+            self.publish(&inner);
+        }
     }
 
     /// Drop a reader for `key`; removes the device once no readers remain.
@@ -85,9 +96,9 @@ impl Registry {
             entry.refs = entry.refs.saturating_sub(1);
             if entry.refs == 0 {
                 inner.remove(key);
+                self.publish(&inner);
             }
         }
-        self.publish(&inner);
     }
 
     /// Called on every controller-state report (~266 Hz) — must stay cheap.

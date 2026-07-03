@@ -57,6 +57,14 @@ impl DeviceInfo {
             "No data"
         }
     }
+
+    pub fn level_label(&self) -> String {
+        if self.has_battery_data() {
+            format!("{}%", self.level)
+        } else {
+            "—".to_string()
+        }
+    }
 }
 
 /// `None` = daemon not reachable on the bus.
@@ -131,9 +139,13 @@ async fn watch(output: &mut mpsc::Sender<State>) -> zbus::Result<()> {
         .receive_name_owner_changed_with_args(&[(0, BUS_NAME)])
         .await?;
 
+    let mut last_sent: Option<State> = None;
     loop {
         let state = fetch_state(&daemon, &conn, &mut proxies).await.ok();
-        let _ = output.send(state).await;
+        if last_sent.as_ref() != Some(&state) {
+            let _ = output.send(state.clone()).await;
+            last_sent = Some(state);
+        }
 
         tokio::select! {
             msg = props_stream.next() => {
@@ -147,7 +159,13 @@ async fn watch(output: &mut mpsc::Sender<State>) -> zbus::Result<()> {
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 while props_stream.next().now_or_never().flatten().is_some() {}
             }
-            _ = name_stream.next() => {}
+            _ = name_stream.next() => {
+                // A new daemon instance re-publishes objects without
+                // re-signalling their initial values, and zbus property
+                // caches are only ever updated by PropertiesChanged — drop
+                // the proxies so stale pre-restart values aren't served.
+                proxies.clear();
+            }
             () = tokio::time::sleep(Duration::from_secs(30)) => {}
         }
     }

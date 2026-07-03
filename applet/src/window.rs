@@ -57,16 +57,11 @@ impl Window {
         format!("battery-level-{level}{suffix}-symbolic")
     }
 
-    #[allow(clippy::unused_self)] // consistency with view methods
-    fn device_details<'a>(&self, dev: &'a DeviceInfo) -> Element<'a, Message> {
+    fn device_details<'a>(dev: &'a DeviceInfo) -> Element<'a, Message> {
         let title = row![
             text::title4(&dev.name),
             cosmic::widget::space::horizontal(),
-            text::title4(if dev.has_battery_data() {
-                format!("{}%", dev.level)
-            } else {
-                "—".to_string()
-            }),
+            text::title4(dev.level_label()),
         ]
         .align_y(Alignment::Center);
 
@@ -214,7 +209,7 @@ impl cosmic::Application for Window {
             children.push(
                 self.core
                     .applet
-                    .text(format!("{}%", dev.level))
+                    .text(dev.level_label())
                     .font(cosmic::font::default())
                     .into(),
             );
@@ -263,7 +258,7 @@ impl cosmic::Application for Window {
                         if i > 0 {
                             col = col.push(divider::horizontal::default());
                         }
-                        col = col.push(self.device_details(dev));
+                        col = col.push(Self::device_details(dev));
                     }
                     col.into()
                 }

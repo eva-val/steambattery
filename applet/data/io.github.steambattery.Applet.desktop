@@ -10,4 +10,6 @@ Icon=input-gaming-symbolic
 StartupNotify=true
 NoDisplay=true
 X-CosmicApplet=true
+X-CosmicShrinkable=true
 X-CosmicHoverPopup=Start
+X-OverflowPriority=10

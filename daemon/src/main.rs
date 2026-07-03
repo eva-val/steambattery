@@ -22,14 +22,10 @@ use tracing::{error, info};
 use discovery::{Event, HidrawNode};
 use state::Registry;
 
-fn spawn_reader(node: &HidrawNode, registry: &Arc<Registry>) -> JoinHandle<()> {
-    let registry = registry.clone();
-    let devnode = node.devnode.clone();
-    let key = node.key.clone();
-    let name = node.name.clone();
+fn spawn_reader(node: HidrawNode, registry: Arc<Registry>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = reader::run(&devnode, &key, &name, registry).await {
-            error!(dev = %devnode.display(), error = %e, "reader failed");
+        if let Err(e) = reader::run(&node.devnode, &node.key, &node.name, registry).await {
+            error!(dev = %node.devnode.display(), error = %e, "reader failed");
         }
     })
 }
@@ -87,7 +83,7 @@ async fn main() -> Result<()> {
     let mut readers: HashMap<PathBuf, JoinHandle<()>> = HashMap::new();
     for node in discovery::scan()? {
         info!(dev = %node.devnode.display(), key = node.key, "found device");
-        readers.insert(node.devnode.clone(), spawn_reader(&node, &registry));
+        readers.insert(node.devnode.clone(), spawn_reader(node, registry.clone()));
     }
     if readers.is_empty() {
         info!("no Steam Controller devices present; waiting for hotplug");
@@ -112,7 +108,7 @@ async fn main() -> Result<()> {
                         for node in nodes {
                             if !readers.contains_key(&node.devnode) {
                                 info!(dev = %node.devnode.display(), key = node.key, "device found on rescan");
-                                readers.insert(node.devnode.clone(), spawn_reader(&node, &registry));
+                                readers.insert(node.devnode.clone(), spawn_reader(node, registry.clone()));
                             }
                         }
                     }
@@ -125,7 +121,7 @@ async fn main() -> Result<()> {
                     // devnode — replace it.
                     if readers.get(&node.devnode).is_none_or(JoinHandle::is_finished) {
                         info!(dev = %node.devnode.display(), key = node.key, "device added");
-                        readers.insert(node.devnode.clone(), spawn_reader(&node, &registry));
+                        readers.insert(node.devnode.clone(), spawn_reader(node, registry.clone()));
                     }
                 }
                 Some(Event::Removed(devnode)) => {

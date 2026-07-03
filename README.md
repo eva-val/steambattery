@@ -32,7 +32,7 @@ Protocol research: [CouchTurtle/sc2-research] and the SDL3 Triton driver.
 
 ```nix
 # flake inputs
-inputs.steambattery.url = "github:evavalentine/steambattery";
+inputs.steambattery.url = "github:eva-val/steambattery";
 
 # NixOS configuration
 imports = [ inputs.steambattery.nixosModules.default ];

@@ -32,7 +32,8 @@
           pkgs = pkgsFor system;
           common = {
             src = self;
-            useFetchCargoVendor = true;
+            # fetchCargoVendor is the default as of nixpkgs 25.05 (the old
+            # importCargoLock path mis-handles this one-repo/multi-crate layout).
             # Covers the whole workspace incl. git deps; update when
             # Cargo.lock changes (`nix build` prints the expected hash).
             cargoHash = "sha256-uWT2rs0JKa/FqdZ4JyFVRNsHUnvV/yQbO1n60uLwECY=";

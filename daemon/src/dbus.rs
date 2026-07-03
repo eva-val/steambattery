@@ -14,14 +14,10 @@ use anyhow::{Context, Result};
 use steambattery_interface::{BUS_NAME, LEVEL_UNKNOWN, ROOT_PATH};
 use tracing::{debug, info, warn};
 use zbus::fdo::Properties;
-use zbus::names::InterfaceName;
-use zbus::object_server::InterfaceRef;
+use zbus::object_server::{Interface, InterfaceRef};
 use zbus::zvariant::{OwnedObjectPath, Value};
 
 use crate::state::{DeviceSnapshot, Registry};
-
-/// Must match the `#[zbus::interface]` name on [`Device`].
-const DEVICE_IFACE: &str = "io.github.steambattery.Device";
 
 struct Daemon {
     devices: Vec<OwnedObjectPath>,
@@ -176,7 +172,7 @@ async fn emit_changes(
     }
     Properties::properties_changed(
         iface.signal_emitter(),
-        InterfaceName::from_static_str_unchecked(DEVICE_IFACE),
+        <Device as Interface>::name(),
         changed,
         Cow::Borrowed(&[]),
     )
@@ -198,21 +194,30 @@ pub async fn run(registry: Arc<Registry>) -> Result<()> {
     info!(name = BUS_NAME, "session bus name acquired");
 
     let server = conn.object_server();
+    let root = server
+        .interface::<_, Daemon>(ROOT_PATH)
+        .await
+        .context("looking up root interface")?;
     let mut rx = registry.subscribe();
-    // key -> (index, last snapshot mirrored to D-Bus)
-    let mut present: BTreeMap<String, (usize, DeviceSnapshot)> = BTreeMap::new();
+    // key -> devN index of the served object (which holds the mirrored
+    // snapshot).
+    let mut present: BTreeMap<String, usize> = BTreeMap::new();
+    // Monotonic so a path is never reused for a different controller —
+    // clients cache per-path property state, and a reused path with no
+    // signal for its initial values would keep serving the old device.
+    let mut next_index: usize = 0;
 
     loop {
         let snapshots = rx.borrow_and_update().clone();
 
-        // Removals first, freeing their indices.
+        // Removals first.
         let gone: Vec<String> = present
             .keys()
             .filter(|k| !snapshots.iter().any(|s| &s.key == *k))
             .cloned()
             .collect();
         for key in gone {
-            if let Some((index, _)) = present.remove(&key) {
+            if let Some(index) = present.remove(&key) {
                 let path = device_path(index);
                 debug!(%path, "removing device object");
                 if let Err(e) = server.remove::<Device, _>(&path).await {
@@ -222,25 +227,25 @@ pub async fn run(registry: Arc<Registry>) -> Result<()> {
         }
 
         for snap in &snapshots {
-            if let Some((index, mirrored)) = present.get_mut(&snap.key) {
-                if mirrored == snap {
-                    continue;
-                }
-                let old = std::mem::replace(mirrored, snap.clone());
-                let path = device_path(*index);
+            if let Some(&index) = present.get(&snap.key) {
+                let path = device_path(index);
                 let iface = server
                     .interface::<_, Device>(&path)
                     .await
                     .context("looking up device interface")?;
-                iface.get_mut().await.snapshot = snap.clone();
+                let old = {
+                    let mut dev = iface.get_mut().await;
+                    if dev.snapshot == *snap {
+                        continue;
+                    }
+                    std::mem::replace(&mut dev.snapshot, snap.clone())
+                };
                 if let Err(e) = emit_changes(&iface, &old, snap).await {
                     warn!(%path, error = %e, "failed to emit PropertiesChanged");
                 }
             } else {
-                // Bounded: at most `present.len()` indices can be taken.
-                let index = (0..=present.len())
-                    .find(|i| !present.values().any(|(v, _)| v == i))
-                    .expect("len()+1 candidates cannot all be taken");
+                let index = next_index;
+                next_index += 1;
                 let path = device_path(index);
                 info!(%path, key = snap.key, "adding device object");
                 server
@@ -252,21 +257,14 @@ pub async fn run(registry: Arc<Registry>) -> Result<()> {
                     )
                     .await
                     .context("adding device object")?;
-                present.insert(snap.key.clone(), (index, snap.clone()));
+                present.insert(snap.key.clone(), index);
             }
         }
 
         // Mirror the device list on the root object.
-        let mut paths: Vec<(usize, OwnedObjectPath)> = present
-            .values()
-            .map(|(i, _)| (*i, device_path(*i)))
-            .collect();
-        paths.sort_unstable_by_key(|(i, _)| *i);
-        let paths: Vec<OwnedObjectPath> = paths.into_iter().map(|(_, p)| p).collect();
-        let root = server
-            .interface::<_, Daemon>(ROOT_PATH)
-            .await
-            .context("looking up root interface")?;
+        let mut indices: Vec<usize> = present.values().copied().collect();
+        indices.sort_unstable();
+        let paths: Vec<OwnedObjectPath> = indices.into_iter().map(device_path).collect();
         if root.get().await.devices != paths {
             root.get_mut().await.devices = paths;
             if let Err(e) = root
@@ -280,5 +278,40 @@ pub async fn run(registry: Arc<Registry>) -> Result<()> {
         }
 
         rx.changed().await.context("registry channel closed")?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    /// `device_props` must list exactly the properties the
+    /// `#[zbus::interface]` macro generates for [`Device`] — a missing or
+    /// misspelled entry silently stops that property's `PropertiesChanged`
+    /// emission.
+    #[test]
+    fn device_props_matches_interface() {
+        let snap = DeviceSnapshot {
+            key: "k".to_string(),
+            name: "dev".to_string(),
+            connected: true,
+            battery: None,
+            last_updated: Some(SystemTime::now()),
+        };
+        let mut xml = String::new();
+        Device {
+            snapshot: snap.clone(),
+        }
+        .introspect_to_writer(&mut xml, 0);
+
+        let props = device_props(&snap);
+        assert_eq!(xml.matches("<property").count(), props.len());
+        for (name, _) in props {
+            assert!(
+                xml.contains(&format!("name=\"{name}\"")),
+                "device_props entry {name} is not a Device property"
+            );
+        }
     }
 }

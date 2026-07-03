@@ -9,12 +9,9 @@ description = "COSMIC panel applet showing Steam Controller 2 battery status"
 
 [dependencies]
 # Pinned to the rev used by cosmic-applets epoch-1.1.0 (matches installed COSMIC 1.1.0).
+# The `applet` feature already pulls in winit/wayland/tokio/multi-window/ron/cosmic-panel-config.
 libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "758c13723fc35b1d82d7fa4f35859c9f7f3c1b0c", default-features = false, features = [
   "applet",
-  "multi-window",
-  "tokio",
-  "wayland",
-  "winit",
 ] }
 steambattery-interface.workspace = true
 zbus.workspace = true
