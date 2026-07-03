@@ -65,7 +65,7 @@
         pkgs.writeShellApplication {
           name = "steambattery-fmt";
           runtimeInputs = with pkgs; [
-            nixfmt-rfc-style
+            nixfmt
             cargo
             rustfmt
             findutils

@@ -55,18 +55,26 @@ impl ChargeState {
 
 /// SDL3 `TritonBatteryStatus_t` — the 14-byte payload of report 0x43.
 ///
-/// Voltage/current/temperature units are not documented by Valve; values are
-/// carried raw. Empirically voltages look like millivolts.
+/// Units are not documented by Valve but were calibrated against live
+/// hardware (2026-07-03): voltages in mV (4134 = full Li-ion cell, 5.1 V USB
+/// input while charging), currents in mA, temperature in milli-°C
+/// (26424 = 26.4 °C at room temperature).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatteryStatus {
     pub charge_state: ChargeState,
     /// 0..=100
     pub level: u8,
+    /// mV
     pub battery_voltage: u16,
+    /// mV
     pub system_voltage: u16,
+    /// mV (~5100 while on USB power, 0 unplugged)
     pub input_voltage: u16,
+    /// mA
     pub current: u16,
+    /// mA
     pub input_current: u16,
+    /// milli-°C
     pub temperature: u16,
 }
 

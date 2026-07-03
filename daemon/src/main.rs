@@ -3,6 +3,7 @@
 //! Reads HID battery reports (0x43) from SC2 hidraw nodes and publishes
 //! controller state on the session D-Bus.
 
+mod dbus;
 mod discovery;
 mod protocol;
 mod reader;
@@ -68,7 +69,11 @@ async fn main() -> Result<()> {
 
     let registry = Arc::new(Registry::new());
 
-    // Log state transitions (the D-Bus layer subscribes the same way).
+    // D-Bus service. If the bus goes away the daemon exits and systemd
+    // restarts it.
+    let mut dbus_task = tokio::spawn(dbus::run(registry.clone()));
+
+    // Log state transitions.
     {
         let mut rx = registry.subscribe();
         tokio::spawn(async move {
@@ -138,6 +143,13 @@ async fn main() -> Result<()> {
                 // Reader exited on its own (unplug seen as ENODEV/EOF, or a
                 // persistent error). It already released its registry ref.
                 readers.remove(&devnode);
+            }
+            result = &mut dbus_task => {
+                match result {
+                    Ok(Err(e)) => return Err(e.context("D-Bus service failed")),
+                    Ok(Ok(())) => unreachable!("dbus::run only returns on error"),
+                    Err(e) => return Err(anyhow::anyhow!(e).context("D-Bus task panicked")),
+                }
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("shutting down");
