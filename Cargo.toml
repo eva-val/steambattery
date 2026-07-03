@@ -4,8 +4,16 @@ members = ["daemon"]
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/evavalentine/steambattery"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Reports carry raw u16 telemetry; docs would just restate field names.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }

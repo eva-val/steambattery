@@ -5,23 +5,29 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
-  outputs = { self, nixpkgs }:
+  outputs =
+    { self, nixpkgs }:
     let
-      forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
+      forAllSystems = nixpkgs.lib.genAttrs [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       pkgsFor = system: nixpkgs.legacyPackages.${system};
 
       # Native deps for libcosmic (applet) and libudev (daemon).
-      runtimeLibs = pkgs: with pkgs; [
-        libxkbcommon
-        wayland
-        libGL
-        vulkan-loader
-        fontconfig
-        freetype
-      ];
+      runtimeLibs =
+        pkgs: with pkgs; [
+          libxkbcommon
+          wayland
+          libGL
+          vulkan-loader
+          fontconfig
+          freetype
+        ];
     in
     {
-      packages = forAllSystems (system:
+      packages = forAllSystems (
+        system:
         let
           pkgs = pkgsFor system;
           common = {
@@ -32,25 +38,59 @@
           };
         in
         rec {
-          steambatteryd = pkgs.rustPlatform.buildRustPackage (common // {
-            pname = "steambatteryd";
-            version = "0.1.0";
-            cargoBuildFlags = [ "-p" "steambatteryd" ];
-            cargoTestFlags = [ "-p" "steambatteryd" ];
-          });
+          steambatteryd = pkgs.rustPlatform.buildRustPackage (
+            common
+            // {
+              pname = "steambatteryd";
+              version = "0.1.0";
+              cargoBuildFlags = [
+                "-p"
+                "steambatteryd"
+              ];
+              cargoTestFlags = [
+                "-p"
+                "steambatteryd"
+              ];
+            }
+          );
           default = steambatteryd;
-        });
+        }
+      );
 
-      devShells = forAllSystems (system:
-        let pkgs = pkgsFor system;
-        in {
+      formatter = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        pkgs.writeShellApplication {
+          name = "steambattery-fmt";
+          runtimeInputs = with pkgs; [
+            nixfmt-rfc-style
+            cargo
+            rustfmt
+            findutils
+          ];
+          text = ''
+            find . -name '*.nix' -not -path './target/*' -exec nixfmt {} +
+            cargo fmt --all
+          '';
+        }
+      );
+
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
           default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [ pkg-config ];
             buildInputs = [ pkgs.udev ] ++ runtimeLibs pkgs;
             # winit/wgpu dlopen these at runtime.
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibs pkgs);
           };
-        });
+        }
+      );
 
       nixosModules.default = import ./nix/module.nix self;
     };

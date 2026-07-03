@@ -40,12 +40,20 @@ pub enum Event {
 /// the puck's status/dongle interface.
 fn classify(device: &udev::Device) -> Option<HidrawNode> {
     let devnode = device.devnode()?.to_path_buf();
-    let usb_dev = device.parent_with_subsystem_devtype("usb", "usb_device").ok()??;
-    let vendor = usb_dev.attribute_value("idVendor")?.to_str()?.to_lowercase();
+    let usb_dev = device
+        .parent_with_subsystem_devtype("usb", "usb_device")
+        .ok()??;
+    let vendor = usb_dev
+        .attribute_value("idVendor")?
+        .to_str()?
+        .to_lowercase();
     if vendor != VALVE_VENDOR {
         return None;
     }
-    let product = usb_dev.attribute_value("idProduct")?.to_str()?.to_lowercase();
+    let product = usb_dev
+        .attribute_value("idProduct")?
+        .to_str()?
+        .to_lowercase();
     let usb_syspath = usb_dev.syspath().to_string_lossy().into_owned();
 
     match product.as_str() {
@@ -128,9 +136,10 @@ pub fn monitor_blocking(tx: mpsc::Sender<Event>) -> Result<()> {
         for event in socket.iter() {
             let out = match event.event_type() {
                 udev::EventType::Add => classify(&event.device()).map(Event::Added),
-                udev::EventType::Remove => {
-                    event.device().devnode().map(|d| Event::Removed(d.to_path_buf()))
-                }
+                udev::EventType::Remove => event
+                    .device()
+                    .devnode()
+                    .map(|d| Event::Removed(d.to_path_buf())),
                 _ => None,
             };
             if let Some(out) = out {

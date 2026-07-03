@@ -1,7 +1,12 @@
 # NixOS module: udev access to SC2 hidraw nodes + user service for the daemon.
 # Imported by the flake as `nixosModules.default` with `self` applied.
 self:
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.hardware.steambattery;
   packages = self.packages.${pkgs.stdenv.hostPlatform.system};

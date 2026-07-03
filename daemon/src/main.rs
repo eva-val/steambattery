@@ -108,7 +108,10 @@ async fn main() -> Result<()> {
     let mut readers: HashMap<PathBuf, JoinHandle<()>> = HashMap::new();
     for node in discovery::scan()? {
         info!(dev = %node.devnode.display(), key = node.key, "found device");
-        readers.insert(node.devnode.clone(), spawn_reader(&node, &registry, &done_tx));
+        readers.insert(
+            node.devnode.clone(),
+            spawn_reader(&node, &registry, &done_tx),
+        );
     }
     if readers.is_empty() {
         info!("no Steam Controller devices present; waiting for hotplug");

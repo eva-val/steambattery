@@ -119,10 +119,7 @@ impl Registry {
         let mut inner = self.inner.lock().unwrap();
         let mut changed = false;
         for entry in inner.values_mut() {
-            if entry.snapshot.connected
-                && entry
-                    .last_seen
-                    .is_none_or(|t| t.elapsed() > STALE_AFTER)
+            if entry.snapshot.connected && entry.last_seen.is_none_or(|t| t.elapsed() > STALE_AFTER)
             {
                 entry.snapshot.connected = false;
                 changed = true;
@@ -134,8 +131,7 @@ impl Registry {
     }
 
     fn publish(&self, inner: &BTreeMap<String, Entry>) {
-        let snapshots: Vec<DeviceSnapshot> =
-            inner.values().map(|e| e.snapshot.clone()).collect();
+        let snapshots: Vec<DeviceSnapshot> = inner.values().map(|e| e.snapshot.clone()).collect();
         self.tx.send_if_modified(|current| {
             if *current == snapshots {
                 false
