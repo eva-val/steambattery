@@ -32,11 +32,10 @@
           pkgs = pkgsFor system;
           common = {
             src = self;
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-              # libcosmic and its pop-os git deps carry locked revs.
-              allowBuiltinFetchGit = true;
-            };
+            useFetchCargoVendor = true;
+            # Covers the whole workspace incl. git deps; update when
+            # Cargo.lock changes (`nix build` prints the expected hash).
+            cargoHash = "sha256-CkQE49Y4FwBQCQcpjw56fW+4US1Zoaqi9ZSAbcFgn0g=";
             nativeBuildInputs = with pkgs; [ pkg-config ];
             buildInputs = [ pkgs.udev ] ++ runtimeLibs pkgs;
           };

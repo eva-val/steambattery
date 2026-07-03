@@ -122,8 +122,27 @@ async fn main() -> Result<()> {
         info!("no Steam Controller devices present; waiting for hotplug");
     }
 
+    // Periodic rescan: recovers devices whose reader failed to open (e.g.
+    // the daemon started before the seat ACL was applied, or a device
+    // re-enumerated without an ACL and got one later).
+    let mut rescan = tokio::time::interval(Duration::from_secs(30));
+    rescan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
+            _ = rescan.tick() => {
+                match discovery::scan() {
+                    Ok(nodes) => {
+                        for node in nodes {
+                            if !readers.contains_key(&node.devnode) {
+                                info!(dev = %node.devnode.display(), key = node.key, "device found on rescan");
+                                readers.insert(node.devnode.clone(), spawn_reader(&node, &registry, &done_tx));
+                            }
+                        }
+                    }
+                    Err(e) => error!(error = %e, "rescan failed"),
+                }
+            }
             Some(event) = event_rx.recv() => match event {
                 Event::Added(node) => {
                     if !readers.contains_key(&node.devnode) {
