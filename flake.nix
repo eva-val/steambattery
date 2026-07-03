@@ -32,7 +32,11 @@
           pkgs = pkgsFor system;
           common = {
             src = self;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              # libcosmic and its pop-os git deps carry locked revs.
+              allowBuiltinFetchGit = true;
+            };
             nativeBuildInputs = with pkgs; [ pkg-config ];
             buildInputs = [ pkgs.udev ] ++ runtimeLibs pkgs;
           };
@@ -53,6 +57,32 @@
               ];
             }
           );
+
+          cosmic-applet-steambattery = pkgs.rustPlatform.buildRustPackage (
+            common
+            // {
+              pname = "cosmic-applet-steambattery";
+              version = "0.1.0";
+              cargoBuildFlags = [
+                "-p"
+                "cosmic-applet-steambattery"
+              ];
+              cargoTestFlags = [
+                "-p"
+                "cosmic-applet-steambattery"
+              ];
+              postInstall = ''
+                install -Dm644 applet/data/io.github.steambattery.Applet.desktop \
+                  $out/share/applications/io.github.steambattery.Applet.desktop
+              '';
+              # The applet loads wayland/vulkan/xkbcommon at runtime.
+              postFixup = ''
+                patchelf --add-rpath ${pkgs.lib.makeLibraryPath (runtimeLibs pkgs)} \
+                  $out/bin/cosmic-applet-steambattery
+              '';
+            }
+          );
+
           default = steambatteryd;
         }
       );

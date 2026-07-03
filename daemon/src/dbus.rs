@@ -229,7 +229,12 @@ pub async fn run(registry: Arc<Registry>) -> Result<()> {
                 let path = device_path(index);
                 info!(%path, key = snap.key, "adding device object");
                 server
-                    .at(&path, Device { snapshot: snap.clone() })
+                    .at(
+                        &path,
+                        Device {
+                            snapshot: snap.clone(),
+                        },
+                    )
                     .await
                     .context("adding device object")?;
                 present.insert(snap.key.clone(), (index, snap.clone()));
@@ -249,7 +254,12 @@ pub async fn run(registry: Arc<Registry>) -> Result<()> {
             .context("looking up root interface")?;
         if root.get().await.devices != paths {
             root.get_mut().await.devices = paths;
-            if let Err(e) = root.get().await.devices_changed(root.signal_emitter()).await {
+            if let Err(e) = root
+                .get()
+                .await
+                .devices_changed(root.signal_emitter())
+                .await
+            {
                 warn!(error = %e, "failed to emit Devices change");
             }
         }

@@ -1,0 +1,26 @@
+[package]
+name = "cosmic-applet-steambattery"
+version = "0.1.0"
+# libcosmic requires 2024; the daemon stays on the workspace's 2021.
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+description = "COSMIC panel applet showing Steam Controller 2 battery status"
+
+[dependencies]
+# Pinned to the rev used by cosmic-applets epoch-1.1.0 (matches installed COSMIC 1.1.0).
+libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "758c13723fc35b1d82d7fa4f35859c9f7f3c1b0c", default-features = false, features = [
+  "applet",
+  "multi-window",
+  "tokio",
+  "wayland",
+  "winit",
+] }
+zbus.workspace = true
+tokio = { workspace = true, features = ["time"] }
+futures-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

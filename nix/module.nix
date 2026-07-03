@@ -23,6 +23,10 @@ in
       KERNEL=="hidraw*", SUBSYSTEMS=="usb", ATTRS{idVendor}=="28de", ATTRS{idProduct}=="130[2-5]", TAG+="uaccess"
     '';
 
+    # Applet binary + desktop entry, so cosmic-panel can list it under
+    # Settings → Desktop → Panel → Configure panel applets.
+    environment.systemPackages = [ packages.cosmic-applet-steambattery ];
+
     systemd.user.services.steambatteryd = {
       description = "Steam Controller 2 battery telemetry daemon";
       wantedBy = [ "default.target" ];

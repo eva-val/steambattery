@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Steam Controller Battery
+Comment=Battery status for the Steam Controller 2
+Type=Application
+Exec=cosmic-applet-steambattery
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Steam;Controller;Battery;
+Icon=input-gaming-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Start
