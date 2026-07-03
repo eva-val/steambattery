@@ -18,16 +18,44 @@ use crate::state::Registry;
 /// Largest report we expect (0x42 is 54 bytes); 64 covers everything.
 const BUF_LEN: usize = 64;
 
+/// Releases the registry ref exactly once, even when the reader task is
+/// aborted mid-read (Drop runs on abort).
+struct ReleaseGuard {
+    registry: Arc<Registry>,
+    key: String,
+}
+
+impl Drop for ReleaseGuard {
+    fn drop(&mut self) {
+        self.registry.release(&self.key);
+    }
+}
+
 /// Read reports from `devnode` and feed `registry` under `key` until the
 /// device disappears or the task is cancelled. Returns Ok(()) when the device
 /// goes away (unplug), Err for unexpected failures (e.g. permissions).
-pub async fn run(devnode: &Path, key: &str, registry: Arc<Registry>) -> anyhow::Result<()> {
+pub async fn run(
+    devnode: &Path,
+    key: &str,
+    name: &str,
+    registry: Arc<Registry>,
+) -> anyhow::Result<()> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(devnode)
         .with_context(|| format!("opening {}", devnode.display()))?;
     let afd = AsyncFd::new(file).context("registering hidraw fd with tokio")?;
+
+    // Only devices we can actually read appear in the registry — acquiring
+    // before the open would publish (and then retract) a D-Bus object on
+    // every retry of an unopenable device.
+    registry.acquire(key, name);
+    let guard = ReleaseGuard {
+        registry,
+        key: key.to_string(),
+    };
+    let registry = &guard.registry;
     info!(dev = %devnode.display(), key, "reader started");
 
     let mut buf = [0u8; BUF_LEN];

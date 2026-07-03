@@ -87,9 +87,16 @@ async fn fetch_state(conn: &zbus::Connection) -> zbus::Result<Vec<DeviceInfo>> {
             .path(path)?
             .build()
             .await?;
-        let all = props
-            .get_all(InterfaceName::try_from(DEVICE_IFACE)?)
-            .await?;
+        let all = match props.get_all(InterfaceName::try_from(DEVICE_IFACE)?).await {
+            Ok(all) => all,
+            // The daemon can remove a device object between our Devices read
+            // and this call; failing the whole fetch would make the UI claim
+            // the daemon itself is down.
+            Err(e) => {
+                tracing::debug!(error = %e, "skipping device that vanished mid-fetch");
+                continue;
+            }
+        };
         let get_u16 = |k: &str| all.get(k).and_then(|v| v.downcast_ref::<u16>().ok());
         out.push(DeviceInfo {
             name: all

@@ -15,10 +15,10 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-const VALVE_VENDOR: &str = "28de";
-const PID_CONTROLLER_USB: &str = "1302";
-const PID_CONTROLLER_BLE: &str = "1303";
-const PID_PUCK: &str = "1304";
+const VALVE_VENDOR: u32 = 0x28de;
+const PID_CONTROLLER_USB: u32 = 0x1302;
+const PID_CONTROLLER_BLE: u32 = 0x1303;
+const PID_PUCK: u32 = 0x1304;
 
 #[derive(Debug, Clone)]
 pub struct HidrawNode {
@@ -36,27 +36,31 @@ pub enum Event {
     Removed(PathBuf),
 }
 
-/// Classify a udev hidraw device; returns None for non-SC2 devices and for
-/// the puck's status/dongle interface.
-fn classify(device: &udev::Device) -> Option<HidrawNode> {
-    let devnode = device.devnode()?.to_path_buf();
+/// Syspath of the USB device ancestor (absent for Bluetooth transports).
+fn usb_syspath(device: &udev::Device) -> Option<String> {
     let usb_dev = device
         .parent_with_subsystem_devtype("usb", "usb_device")
         .ok()??;
-    let vendor = usb_dev
-        .attribute_value("idVendor")?
-        .to_str()?
-        .to_lowercase();
-    if vendor != VALVE_VENDOR {
+    Some(usb_dev.syspath().to_string_lossy().into_owned())
+}
+
+/// Classify a udev hidraw device; returns None for non-SC2 devices and for
+/// the puck's status/dongle interface.
+///
+/// Identity comes from the hid parent's `HID_ID` (`<bus>:<vid>:<pid>`, hex),
+/// which is present on every transport — a Bluetooth controller has no USB
+/// ancestor to read `idVendor`/`idProduct` from.
+fn classify(device: &udev::Device) -> Option<HidrawNode> {
+    let devnode = device.devnode()?.to_path_buf();
+    let hid_dev = device.parent_with_subsystem("hid").ok()??;
+    let hid_id = hid_dev.property_value("HID_ID")?.to_str()?;
+    let (_bus, rest) = hid_id.split_once(':')?;
+    let (vendor, product) = rest.split_once(':')?;
+    if u32::from_str_radix(vendor, 16).ok()? != VALVE_VENDOR {
         return None;
     }
-    let product = usb_dev
-        .attribute_value("idProduct")?
-        .to_str()?
-        .to_lowercase();
-    let usb_syspath = usb_dev.syspath().to_string_lossy().into_owned();
 
-    match product.as_str() {
+    match u32::from_str_radix(product, 16).ok()? {
         PID_PUCK => {
             let iface = device
                 .parent_with_subsystem_devtype("usb", "usb_interface")
@@ -72,20 +76,32 @@ fn classify(device: &udev::Device) -> Option<HidrawNode> {
             }
             Some(HidrawNode {
                 devnode,
-                key: format!("{usb_syspath}/slot{slot}"),
+                key: format!("{}/slot{slot}", usb_syspath(device)?),
                 name: format!("Steam Controller (puck slot {slot})"),
             })
         }
         PID_CONTROLLER_USB => Some(HidrawNode {
             devnode,
-            key: usb_syspath,
+            key: usb_syspath(device)?,
             name: "Steam Controller (USB)".to_string(),
         }),
-        PID_CONTROLLER_BLE => Some(HidrawNode {
-            devnode,
-            key: usb_syspath,
-            name: "Steam Controller (Bluetooth)".to_string(),
-        }),
+        PID_CONTROLLER_BLE => {
+            // HID_UNIQ is the controller's BT address — stable across
+            // reconnects, unlike the hid syspath (instance-numbered).
+            let key = hid_dev
+                .property_value("HID_UNIQ")
+                .and_then(|s| s.to_str())
+                .filter(|s| !s.is_empty())
+                .map_or_else(
+                    || hid_dev.syspath().to_string_lossy().into_owned(),
+                    |uniq| format!("ble/{uniq}"),
+                );
+            Some(HidrawNode {
+                devnode,
+                key,
+                name: "Steam Controller (Bluetooth)".to_string(),
+            })
+        }
         _ => None,
     }
 }

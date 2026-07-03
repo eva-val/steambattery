@@ -42,58 +42,18 @@ impl Window {
             .or_else(|| devices.iter().find(|d| d.has_battery_data()))
     }
 
-    fn panel_icon(&self) -> &'static str {
-        const NAMES: [[&str; 2]; 11] = [
-            [
-                "battery-level-0-symbolic",
-                "battery-level-0-charging-symbolic",
-            ],
-            [
-                "battery-level-10-symbolic",
-                "battery-level-10-charging-symbolic",
-            ],
-            [
-                "battery-level-20-symbolic",
-                "battery-level-20-charging-symbolic",
-            ],
-            [
-                "battery-level-30-symbolic",
-                "battery-level-30-charging-symbolic",
-            ],
-            [
-                "battery-level-40-symbolic",
-                "battery-level-40-charging-symbolic",
-            ],
-            [
-                "battery-level-50-symbolic",
-                "battery-level-50-charging-symbolic",
-            ],
-            [
-                "battery-level-60-symbolic",
-                "battery-level-60-charging-symbolic",
-            ],
-            [
-                "battery-level-70-symbolic",
-                "battery-level-70-charging-symbolic",
-            ],
-            [
-                "battery-level-80-symbolic",
-                "battery-level-80-charging-symbolic",
-            ],
-            [
-                "battery-level-90-symbolic",
-                "battery-level-90-charging-symbolic",
-            ],
-            [
-                "battery-level-100-symbolic",
-                "battery-level-100-charged-symbolic",
-            ],
-        ];
+    fn panel_icon(&self) -> String {
         let Some(dev) = self.primary() else {
-            return "battery-missing-symbolic";
+            return "battery-missing-symbolic".to_string();
         };
+        // Round to the nearest icon step (0, 10, .., 100).
         let level = (usize::from(dev.level.min(100)) + 5) / 10 * 10;
-        NAMES[level / 10][usize::from(dev.charging || dev.charge_state == 4)]
+        let suffix = match (level, dev.charging || dev.charge_state == 4) {
+            (_, false) => "",
+            (100, true) => "-charged",
+            (_, true) => "-charging",
+        };
+        format!("battery-level-{level}{suffix}-symbolic")
     }
 
     #[allow(clippy::unused_self)] // consistency with view methods
@@ -117,18 +77,19 @@ impl Window {
             "Asleep or disconnected".to_string()
         };
 
-        let mut col = column![title, text::body(status)].spacing(4);
+        let mut rows: Vec<Element<'a, Message>> = vec![title.into(), text::body(status).into()];
 
         if dev.has_battery_data() {
             let volts = |mv: u16| format!("{:.2} V", f32::from(mv) / 1000.0);
             let mut detail = |label: &str, value: String| {
-                col = std::mem::replace(&mut col, column![]).push(
+                rows.push(
                     row![
                         text::caption(label.to_string()),
                         cosmic::widget::space::horizontal(),
                         text::caption(value),
                     ]
-                    .align_y(Alignment::Center),
+                    .align_y(Alignment::Center)
+                    .into(),
                 );
             };
             detail("Battery voltage", volts(dev.battery_voltage));
@@ -158,7 +119,9 @@ impl Window {
             }
         }
 
-        col.into()
+        cosmic::iced::widget::Column::with_children(rows)
+            .spacing(4)
+            .into()
     }
 }
 

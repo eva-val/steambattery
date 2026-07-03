@@ -10,11 +10,10 @@ description = "Battery telemetry daemon for the Steam Controller 2 (Triton)"
 workspace = true
 
 [dependencies]
-tokio = { workspace = true, features = ["net", "io-util"] }
+tokio = { workspace = true, features = ["net"] }
 zbus.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 libc.workspace = true
 udev.workspace = true
-futures-util.workspace = true

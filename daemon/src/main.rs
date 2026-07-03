@@ -22,39 +22,15 @@ use tracing::{error, info};
 use discovery::{Event, HidrawNode};
 use state::Registry;
 
-/// Releases the registry ref exactly once, even when the reader task is
-/// aborted mid-read (Drop runs on abort).
-struct ReleaseGuard {
-    registry: Arc<Registry>,
-    key: String,
-}
-
-impl Drop for ReleaseGuard {
-    fn drop(&mut self) {
-        self.registry.release(&self.key);
-    }
-}
-
-fn spawn_reader(
-    node: &HidrawNode,
-    registry: &Arc<Registry>,
-    done_tx: &mpsc::Sender<PathBuf>,
-) -> JoinHandle<()> {
-    registry.acquire(&node.key, &node.name);
-    let guard = ReleaseGuard {
-        registry: registry.clone(),
-        key: node.key.clone(),
-    };
+fn spawn_reader(node: &HidrawNode, registry: &Arc<Registry>) -> JoinHandle<()> {
     let registry = registry.clone();
-    let done_tx = done_tx.clone();
     let devnode = node.devnode.clone();
     let key = node.key.clone();
+    let name = node.name.clone();
     tokio::spawn(async move {
-        let _guard = guard;
-        if let Err(e) = reader::run(&devnode, &key, registry).await {
+        if let Err(e) = reader::run(&devnode, &key, &name, registry).await {
             error!(dev = %devnode.display(), error = %e, "reader failed");
         }
-        let _ = done_tx.send(devnode).await;
     })
 }
 
@@ -97,26 +73,21 @@ async fn main() -> Result<()> {
     }
 
     let (event_tx, mut event_rx) = mpsc::channel::<Event>(16);
-    let (done_tx, mut done_rx) = mpsc::channel::<PathBuf>(16);
 
     // Hotplug monitor — start before the initial scan so nothing is missed.
-    // Runs on its own thread because udev types are !Send.
-    {
-        let event_tx = event_tx.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = discovery::monitor_blocking(event_tx) {
-                error!(error = %e, "udev monitor failed");
-            }
-        });
-    }
+    // Runs on its own thread because udev types are !Send. The thread owns
+    // the only sender, so if it dies the channel closes and the daemon exits
+    // (systemd restarts it) rather than silently losing hotplug events.
+    std::thread::spawn(move || {
+        if let Err(e) = discovery::monitor_blocking(event_tx) {
+            error!(error = %e, "udev monitor failed");
+        }
+    });
 
     let mut readers: HashMap<PathBuf, JoinHandle<()>> = HashMap::new();
     for node in discovery::scan()? {
         info!(dev = %node.devnode.display(), key = node.key, "found device");
-        readers.insert(
-            node.devnode.clone(),
-            spawn_reader(&node, &registry, &done_tx),
-        );
+        readers.insert(node.devnode.clone(), spawn_reader(&node, &registry));
     }
     if readers.is_empty() {
         info!("no Steam Controller devices present; waiting for hotplug");
@@ -131,38 +102,41 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = rescan.tick() => {
+                // Readers that exited on their own (unplug seen as
+                // ENODEV/EOF, a persistent error, or a panic) already
+                // released their registry ref; drop their dead handles so
+                // the devnode counts as absent below.
+                readers.retain(|_, task| !task.is_finished());
                 match discovery::scan() {
                     Ok(nodes) => {
                         for node in nodes {
                             if !readers.contains_key(&node.devnode) {
                                 info!(dev = %node.devnode.display(), key = node.key, "device found on rescan");
-                                readers.insert(node.devnode.clone(), spawn_reader(&node, &registry, &done_tx));
+                                readers.insert(node.devnode.clone(), spawn_reader(&node, &registry));
                             }
                         }
                     }
                     Err(e) => error!(error = %e, "rescan failed"),
                 }
             }
-            Some(event) = event_rx.recv() => match event {
-                Event::Added(node) => {
-                    if !readers.contains_key(&node.devnode) {
+            event = event_rx.recv() => match event {
+                Some(Event::Added(node)) => {
+                    // A finished handle is a dead reader for a re-enumerated
+                    // devnode — replace it.
+                    if readers.get(&node.devnode).is_none_or(JoinHandle::is_finished) {
                         info!(dev = %node.devnode.display(), key = node.key, "device added");
-                        readers.insert(node.devnode.clone(), spawn_reader(&node, &registry, &done_tx));
+                        readers.insert(node.devnode.clone(), spawn_reader(&node, &registry));
                     }
                 }
-                Event::Removed(devnode) => {
+                Some(Event::Removed(devnode)) => {
                     if let Some(task) = readers.remove(&devnode) {
                         info!(dev = %devnode.display(), "device removed");
                         // Abort; the reader's ReleaseGuard drops the registry ref.
                         task.abort();
                     }
                 }
+                None => return Err(anyhow::anyhow!("udev monitor thread exited")),
             },
-            Some(devnode) = done_rx.recv() => {
-                // Reader exited on its own (unplug seen as ENODEV/EOF, or a
-                // persistent error). It already released its registry ref.
-                readers.remove(&devnode);
-            }
             result = &mut dbus_task => {
                 match result {
                     Ok(Err(e)) => return Err(e.context("D-Bus service failed")),

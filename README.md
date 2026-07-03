@@ -8,8 +8,8 @@ The kernel's `hid-steam` driver doesn't (yet) support the SC2 family, so
 nothing shows up in UPower — this fills the gap in userspace.
 
 - `daemon/` — **steambatteryd**: discovers SC2 devices (wired `28de:1302`,
-  puck dongle `28de:1304`) via udev, reads battery reports from hidraw, and
-  publishes state on the session D-Bus.
+  Bluetooth `28de:1303`, puck dongle `28de:1304`) via udev, reads battery
+  reports from hidraw, and publishes state on the session D-Bus.
 - `applet/` — **cosmic-applet-steambattery**: panel icon + percentage, with a
   popup showing charge state, voltages, currents, and temperature.
 
