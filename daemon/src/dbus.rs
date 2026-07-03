@@ -5,22 +5,23 @@
 //! interface) carries the battery telemetry as properties with standard
 //! `PropertiesChanged` signals.
 
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
+use steambattery_interface::{BUS_NAME, LEVEL_UNKNOWN, ROOT_PATH};
 use tracing::{debug, info, warn};
+use zbus::fdo::Properties;
+use zbus::names::InterfaceName;
 use zbus::object_server::InterfaceRef;
-use zbus::zvariant::OwnedObjectPath;
+use zbus::zvariant::{OwnedObjectPath, Value};
 
 use crate::state::{DeviceSnapshot, Registry};
 
-pub const BUS_NAME: &str = "io.github.steambattery";
-pub const ROOT_PATH: &str = "/io/github/steambattery";
-
-/// `BatteryLevel` value meaning "no battery report received yet".
-const LEVEL_UNKNOWN: u8 = 0xff;
+/// Must match the `#[zbus::interface]` name on [`Device`].
+const DEVICE_IFACE: &str = "io.github.steambattery.Device";
 
 struct Daemon {
     devices: Vec<OwnedObjectPath>,
@@ -74,11 +75,6 @@ impl Device {
         self.battery().map_or(0, |b| b.charge_state.as_u8())
     }
 
-    #[zbus(property)]
-    fn charging(&self) -> bool {
-        self.battery().is_some_and(|b| b.charge_state.is_charging())
-    }
-
     /// 0..=100, or 255 when no battery report has been received yet.
     #[zbus(property)]
     fn battery_level(&self) -> u8 {
@@ -124,11 +120,36 @@ impl Device {
     /// Unix seconds of the last battery report; 0 = never.
     #[zbus(property)]
     fn last_updated(&self) -> u64 {
-        self.snapshot
-            .last_updated
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs())
+        last_updated_secs(&self.snapshot)
     }
+}
+
+fn last_updated_secs(snap: &DeviceSnapshot) -> u64 {
+    snap.last_updated
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Every `.Device` property as a wire value — the list `emit_changes` diffs.
+/// Keep in step with the `#[zbus::interface]` getters on [`Device`].
+fn device_props(snap: &DeviceSnapshot) -> [(&'static str, Value<'static>); 11] {
+    let b = snap.battery.as_ref();
+    [
+        ("Name", snap.name.clone().into()),
+        ("Connected", snap.connected.into()),
+        (
+            "ChargeState",
+            b.map_or(0, |b| b.charge_state.as_u8()).into(),
+        ),
+        ("BatteryLevel", b.map_or(LEVEL_UNKNOWN, |b| b.level).into()),
+        ("BatteryVoltage", b.map_or(0, |b| b.battery_voltage).into()),
+        ("SystemVoltage", b.map_or(0, |b| b.system_voltage).into()),
+        ("InputVoltage", b.map_or(0, |b| b.input_voltage).into()),
+        ("Current", b.map_or(0, |b| b.current).into()),
+        ("InputCurrent", b.map_or(0, |b| b.input_current).into()),
+        ("Temperature", b.map_or(0, |b| b.temperature).into()),
+        ("LastUpdated", last_updated_secs(snap).into()),
+    ]
 }
 
 fn device_path(index: usize) -> OwnedObjectPath {
@@ -136,36 +157,30 @@ fn device_path(index: usize) -> OwnedObjectPath {
         .expect("static path format is always valid")
 }
 
-/// Emit `PropertiesChanged` for every property that differs between `old`
-/// and the interface's current snapshot.
-// Read guard held across the emits: each `*_changed` reads the property
-// value, and it must be the same snapshot for all of them.
-#[allow(clippy::significant_drop_tightening)]
+/// Emit a single `PropertiesChanged` carrying every property whose value
+/// differs between `old` and `new` (a battery report where only some fields
+/// moved signals only those fields).
 async fn emit_changes(
     iface: &InterfaceRef<Device>,
     old: &DeviceSnapshot,
     new: &DeviceSnapshot,
 ) -> zbus::Result<()> {
-    let dev = iface.get().await;
-    let ctxt = iface.signal_emitter();
-    if old.connected != new.connected {
-        dev.connected_changed(ctxt).await?;
+    let changed: HashMap<&str, Value<'_>> = device_props(new)
+        .into_iter()
+        .zip(device_props(old))
+        .filter(|(new, old)| new.1 != old.1)
+        .map(|(new, _)| new)
+        .collect();
+    if changed.is_empty() {
+        return Ok(());
     }
-    if old.battery != new.battery {
-        dev.charge_state_changed(ctxt).await?;
-        dev.charging_changed(ctxt).await?;
-        dev.battery_level_changed(ctxt).await?;
-        dev.battery_voltage_changed(ctxt).await?;
-        dev.system_voltage_changed(ctxt).await?;
-        dev.input_voltage_changed(ctxt).await?;
-        dev.current_changed(ctxt).await?;
-        dev.input_current_changed(ctxt).await?;
-        dev.temperature_changed(ctxt).await?;
-    }
-    if old.last_updated != new.last_updated {
-        dev.last_updated_changed(ctxt).await?;
-    }
-    Ok(())
+    Properties::properties_changed(
+        iface.signal_emitter(),
+        InterfaceName::from_static_str_unchecked(DEVICE_IFACE),
+        changed,
+        Cow::Borrowed(&[]),
+    )
+    .await
 }
 
 /// Serve the bus, mirroring registry snapshots into D-Bus objects. Runs until

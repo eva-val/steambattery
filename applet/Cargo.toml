@@ -16,6 +16,7 @@ libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "758c13723fc35b
   "wayland",
   "winit",
 ] }
+steambattery-interface.workspace = true
 zbus.workspace = true
 tokio = { workspace = true, features = ["time"] }
 futures-util.workspace = true

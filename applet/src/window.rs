@@ -8,7 +8,7 @@ use cosmic::iced::{Alignment, Subscription, window};
 use cosmic::widget::{button, container, divider, icon, text};
 use cosmic::{Element, Task, theme};
 
-use crate::dbus::{self, DeviceInfo, State};
+use crate::dbus::{self, ChargeState, DeviceInfo, State};
 
 pub fn run() -> cosmic::iced::Result {
     cosmic::applet::run::<Window>(())
@@ -48,7 +48,8 @@ impl Window {
         };
         // Round to the nearest icon step (0, 10, .., 100).
         let level = (usize::from(dev.level.min(100)) + 5) / 10 * 10;
-        let suffix = match (level, dev.charging || dev.charge_state == 4) {
+        let plugged = dev.charging() || dev.charge_state == ChargeState::ChargingDone;
+        let suffix = match (level, plugged) {
             (_, false) => "",
             (100, true) => "-charged",
             (_, true) => "-charging",

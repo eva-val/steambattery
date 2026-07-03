@@ -1,6 +1,9 @@
 //! Client side of the `io.github.steambattery` session service: state
-//! fetching plus an iced subscription that pushes updates into the applet.
+//! fetching through the shared [`steambattery_interface`] proxies, plus an
+//! iced subscription that pushes updates into the applet.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::time::Duration;
 
 use cosmic::iced::Subscription;
@@ -8,26 +11,18 @@ use cosmic::iced::futures::channel::mpsc;
 use cosmic::iced::futures::{SinkExt, StreamExt};
 use cosmic::iced::stream;
 use futures_util::FutureExt;
+use steambattery_interface::{BUS_NAME, DaemonProxy, DeviceProxy, ROOT_PATH};
 use zbus::zvariant::OwnedObjectPath;
-use zbus::{MatchRule, MessageStream, fdo, names::InterfaceName};
+use zbus::{MatchRule, MessageStream, fdo};
 
-pub const BUS_NAME: &str = "io.github.steambattery";
-pub const ROOT_PATH: &str = "/io/github/steambattery";
-const DEVICE_IFACE: &str = "io.github.steambattery.Device";
-const DAEMON_IFACE: &str = "io.github.steambattery.Daemon";
-
-/// `BatteryLevel` sentinel for "no battery report yet".
-pub const LEVEL_UNKNOWN: u8 = 0xff;
+pub use steambattery_interface::{ChargeState, LEVEL_UNKNOWN};
 
 /// Mirror of the daemon's `.Device` properties.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub name: String,
     pub connected: bool,
-    pub charging: bool,
-    /// SDL3 `EChargeState` (0 reset, 1 discharging, 2 charging,
-    /// 3 src-validate, 4 done); 0 until the first report.
-    pub charge_state: u8,
+    pub charge_state: ChargeState,
     /// 0..=100, or [`LEVEL_UNKNOWN`].
     pub level: u8,
     /// mV
@@ -51,16 +46,15 @@ impl DeviceInfo {
         self.level != LEVEL_UNKNOWN
     }
 
+    pub const fn charging(&self) -> bool {
+        self.charge_state.is_charging()
+    }
+
     pub const fn charge_state_label(&self) -> &'static str {
-        if !self.has_battery_data() {
-            return "No data";
-        }
-        match self.charge_state {
-            1 => "Discharging",
-            2 => "Charging",
-            3 => "Charger validating",
-            4 => "Fully charged",
-            _ => "Unknown",
+        if self.has_battery_data() {
+            self.charge_state.label()
+        } else {
+            "No data"
         }
     }
 }
@@ -68,68 +62,52 @@ impl DeviceInfo {
 /// `None` = daemon not reachable on the bus.
 pub type State = Option<Vec<DeviceInfo>>;
 
-async fn fetch_state(conn: &zbus::Connection) -> zbus::Result<Vec<DeviceInfo>> {
-    let daemon_props = fdo::PropertiesProxy::builder(conn)
-        .destination(BUS_NAME)?
-        .path(ROOT_PATH)?
-        .build()
-        .await?;
-    let devices: Vec<OwnedObjectPath> = daemon_props
-        .get(InterfaceName::try_from(DAEMON_IFACE)?, "Devices")
-        .await?
-        .try_into()
-        .map_err(zbus::Error::Variant)?;
+async fn fetch_device(dev: &DeviceProxy<'_>) -> zbus::Result<DeviceInfo> {
+    Ok(DeviceInfo {
+        name: dev.name().await?,
+        connected: dev.connected().await?,
+        charge_state: ChargeState::from(dev.charge_state().await?),
+        level: dev.battery_level().await?,
+        battery_voltage: dev.battery_voltage().await?,
+        system_voltage: dev.system_voltage().await?,
+        input_voltage: dev.input_voltage().await?,
+        current: dev.current().await?,
+        input_current: dev.input_current().await?,
+        temperature: dev.temperature().await?,
+        last_updated: dev.last_updated().await?,
+    })
+}
+
+/// Device proxies are cached across fetches: zbus keeps their properties
+/// fresh from `PropertiesChanged`, so a steady-state refetch reads from the
+/// local cache instead of doing bus round-trips.
+async fn fetch_state(
+    daemon: &DaemonProxy<'_>,
+    conn: &zbus::Connection,
+    proxies: &mut HashMap<OwnedObjectPath, DeviceProxy<'static>>,
+) -> zbus::Result<Vec<DeviceInfo>> {
+    let devices = daemon.devices().await?;
+    proxies.retain(|path, _| devices.contains(path));
 
     let mut out = Vec::with_capacity(devices.len());
     for path in devices {
-        let props = fdo::PropertiesProxy::builder(conn)
-            .destination(BUS_NAME)?
-            .path(path)?
-            .build()
-            .await?;
-        let all = match props.get_all(InterfaceName::try_from(DEVICE_IFACE)?).await {
-            Ok(all) => all,
-            // The daemon can remove a device object between our Devices read
-            // and this call; failing the whole fetch would make the UI claim
-            // the daemon itself is down.
-            Err(e) => {
-                tracing::debug!(error = %e, "skipping device that vanished mid-fetch");
-                continue;
+        let dev = match proxies.entry(path) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let dev = DeviceProxy::builder(conn)
+                    .path(e.key().clone())?
+                    .build()
+                    .await?;
+                e.insert(dev)
             }
         };
-        let get_u16 = |k: &str| all.get(k).and_then(|v| v.downcast_ref::<u16>().ok());
-        out.push(DeviceInfo {
-            name: all
-                .get("Name")
-                .and_then(|v| v.downcast_ref::<String>().ok())
-                .unwrap_or_default(),
-            connected: all
-                .get("Connected")
-                .and_then(|v| v.downcast_ref::<bool>().ok())
-                .unwrap_or_default(),
-            charging: all
-                .get("Charging")
-                .and_then(|v| v.downcast_ref::<bool>().ok())
-                .unwrap_or_default(),
-            charge_state: all
-                .get("ChargeState")
-                .and_then(|v| v.downcast_ref::<u8>().ok())
-                .unwrap_or_default(),
-            level: all
-                .get("BatteryLevel")
-                .and_then(|v| v.downcast_ref::<u8>().ok())
-                .unwrap_or(LEVEL_UNKNOWN),
-            battery_voltage: get_u16("BatteryVoltage").unwrap_or_default(),
-            system_voltage: get_u16("SystemVoltage").unwrap_or_default(),
-            input_voltage: get_u16("InputVoltage").unwrap_or_default(),
-            current: get_u16("Current").unwrap_or_default(),
-            input_current: get_u16("InputCurrent").unwrap_or_default(),
-            temperature: get_u16("Temperature").unwrap_or_default(),
-            last_updated: all
-                .get("LastUpdated")
-                .and_then(|v| v.downcast_ref::<u64>().ok())
-                .unwrap_or_default(),
-        });
+        match fetch_device(dev).await {
+            Ok(info) => out.push(info),
+            // The daemon can remove a device object between our Devices read
+            // and this fetch; failing the whole fetch would make the UI
+            // claim the daemon itself is down.
+            Err(e) => tracing::debug!(error = %e, "skipping device that vanished mid-fetch"),
+        }
     }
     Ok(out)
 }
@@ -138,6 +116,8 @@ async fn fetch_state(conn: &zbus::Connection) -> zbus::Result<Vec<DeviceInfo>> {
 /// on daemon start/stop, and every 30 s as a fallback.
 async fn watch(output: &mut mpsc::Sender<State>) -> zbus::Result<()> {
     let conn = zbus::Connection::session().await?;
+    let daemon = DaemonProxy::new(&conn).await?;
+    let mut proxies = HashMap::new();
 
     let props_rule = MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
@@ -152,7 +132,7 @@ async fn watch(output: &mut mpsc::Sender<State>) -> zbus::Result<()> {
         .await?;
 
     loop {
-        let state = fetch_state(&conn).await.ok();
+        let state = fetch_state(&daemon, &conn, &mut proxies).await.ok();
         let _ = output.send(state).await;
 
         tokio::select! {
@@ -161,8 +141,9 @@ async fn watch(output: &mut mpsc::Sender<State>) -> zbus::Result<()> {
                     // Bus connection died; reconnect from scratch.
                     return Ok(());
                 }
-                // One battery report fans out into several PropertiesChanged
-                // signals — debounce and drain before refetching.
+                // Let the proxy property caches apply the same signals, and
+                // coalesce bursts (several devices updating at once) into
+                // one refetch.
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 while props_stream.next().now_or_never().flatten().is_some() {}
             }

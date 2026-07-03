@@ -5,53 +5,14 @@
 //! <https://github.com/CouchTurtle/sc2-research>. All multi-byte fields are
 //! little-endian; `#pragma pack(1)` semantics (no padding).
 
+pub use steambattery_interface::ChargeState;
+
 pub const REPORT_CONTROLLER_STATE: u8 = 0x42;
 pub const REPORT_BATTERY_STATUS: u8 = 0x43;
 pub const REPORT_CONTROLLER_STATE_BLE: u8 = 0x45;
 
 /// Total size of report 0x43 including the report-ID byte.
 pub const BATTERY_REPORT_LEN: usize = 15;
-
-/// SDL3 `EChargeState`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChargeState {
-    Reset,
-    Discharging,
-    Charging,
-    SrcValidate,
-    ChargingDone,
-    Unknown(u8),
-}
-
-impl From<u8> for ChargeState {
-    fn from(v: u8) -> Self {
-        match v {
-            0 => Self::Reset,
-            1 => Self::Discharging,
-            2 => Self::Charging,
-            3 => Self::SrcValidate,
-            4 => Self::ChargingDone,
-            other => Self::Unknown(other),
-        }
-    }
-}
-
-impl ChargeState {
-    pub const fn as_u8(self) -> u8 {
-        match self {
-            Self::Reset => 0,
-            Self::Discharging => 1,
-            Self::Charging => 2,
-            Self::SrcValidate => 3,
-            Self::ChargingDone => 4,
-            Self::Unknown(v) => v,
-        }
-    }
-
-    pub const fn is_charging(self) -> bool {
-        matches!(self, Self::Charging | Self::SrcValidate)
-    }
-}
 
 /// SDL3 `TritonBatteryStatus_t` — the 14-byte payload of report 0x43.
 ///
@@ -157,17 +118,6 @@ mod tests {
         assert_eq!(parse_battery_report(&r), None);
         assert_eq!(parse_battery_report(&r[..14]), None);
         assert_eq!(parse_battery_report(&[]), None);
-    }
-
-    #[test]
-    fn charge_state_roundtrip() {
-        for v in 0..=5u8 {
-            assert_eq!(ChargeState::from(v).as_u8(), v);
-        }
-        assert_eq!(ChargeState::from(4), ChargeState::ChargingDone);
-        assert_eq!(ChargeState::from(9), ChargeState::Unknown(9));
-        assert!(ChargeState::Charging.is_charging());
-        assert!(!ChargeState::Discharging.is_charging());
     }
 
     #[test]

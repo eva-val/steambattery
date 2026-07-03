@@ -35,7 +35,7 @@
             useFetchCargoVendor = true;
             # Covers the whole workspace incl. git deps; update when
             # Cargo.lock changes (`nix build` prints the expected hash).
-            cargoHash = "sha256-CkQE49Y4FwBQCQcpjw56fW+4US1Zoaqi9ZSAbcFgn0g=";
+            cargoHash = "sha256-uWT2rs0JKa/FqdZ4JyFVRNsHUnvV/yQbO1n60uLwECY=";
             nativeBuildInputs = with pkgs; [ pkg-config ];
             buildInputs = [ pkgs.udev ] ++ runtimeLibs pkgs;
           };

@@ -12,6 +12,8 @@ nothing shows up in UPower — this fills the gap in userspace.
   reports from hidraw, and publishes state on the session D-Bus.
 - `applet/` — **cosmic-applet-steambattery**: panel icon + percentage, with a
   popup showing charge state, voltages, currents, and temperature.
+- `interface/` — **steambattery-interface**: the shared D-Bus contract
+  (constants, `ChargeState`, and `zbus` client proxies for third parties).
 
 ## Protocol
 
@@ -56,8 +58,7 @@ Session bus name `io.github.steambattery`.
 - `/io/github/steambattery/devN` — `io.github.steambattery.Device`
   - `Name: s`, `Connected: b`
   - `ChargeState: y` — SDL3 `EChargeState`: 0 reset, 1 discharging,
-    2 charging, 3 charger-validate, 4 done
-  - `Charging: b`
+    2 charging, 3 charger-validate, 4 done (2 and 3 mean "charging")
   - `BatteryLevel: y` — 0–100, 255 = no report yet
   - `BatteryVoltage`, `SystemVoltage`, `InputVoltage: q` — mV
   - `Current`, `InputCurrent: q` — mA

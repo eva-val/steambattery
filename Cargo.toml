@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["daemon", "applet"]
+members = ["daemon", "applet", "interface"]
 
 [workspace.package]
 edition = "2021"
@@ -16,6 +16,7 @@ missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 
 [workspace.dependencies]
+steambattery-interface = { path = "interface" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 tracing = "0.1"
