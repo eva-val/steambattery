@@ -40,11 +40,11 @@ use cosmic_settings_upower_subscription::{
 };
 
 use rustc_hash::FxHashMap;
-use std::{path::PathBuf, time::Duration};
+use std::{collections::VecDeque, path::PathBuf, time::Duration};
 use tokio::sync::mpsc::UnboundedSender;
 
-// XXX improve
-// TODO: time to empty varies? needs averaging?
+// Pure formatter. UPower's noisy TimeToEmpty is smoothed upstream of this by
+// `CosmicBatteryApplet::push_time_remaining`, so no averaging is needed here.
 fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
     if secs > 60 {
@@ -83,6 +83,7 @@ struct CosmicBatteryApplet {
     gpus: FxHashMap<PathBuf, GPUData>,
     update_trigger: Option<UnboundedSender<()>>,
     time_remaining: Duration,
+    time_remaining_samples: VecDeque<Duration>,
     max_kbd_brightness: Option<i32>,
     kbd_brightness: Option<i32>,
     max_screen_brightness: Option<i32>,
@@ -99,6 +100,8 @@ struct CosmicBatteryApplet {
 }
 
 impl CosmicBatteryApplet {
+    const TIME_REMAINING_WINDOW: usize = 5;
+
     fn update_battery(&mut self, mut percent: f64, on_battery: bool) {
         percent = percent.clamp(0.0, 100.0);
         self.on_battery = on_battery;
@@ -131,6 +134,18 @@ impl CosmicBatteryApplet {
         let charging = if on_battery { "" } else { "charging-" };
         self.icon_name =
             format!("cosmic-applet-battery-level-{battery_percent}-{limited}{charging}symbolic",);
+    }
+
+    // Smooths UPower's noisy TimeToEmpty. Median (not mean) so a single wild
+    // sample can't skew the shown estimate. Reset by callers on charge-state change.
+    fn push_time_remaining(&mut self, raw: Duration) {
+        self.time_remaining_samples.push_back(raw);
+        while self.time_remaining_samples.len() > Self::TIME_REMAINING_WINDOW {
+            self.time_remaining_samples.pop_front();
+        }
+        let mut sorted: Vec<Duration> = self.time_remaining_samples.iter().copied().collect();
+        sorted.sort_unstable();
+        self.time_remaining = sorted[sorted.len() / 2];
     }
 
     fn screen_brightness_percent(&self) -> Option<f64> {
@@ -168,6 +183,20 @@ impl CosmicBatteryApplet {
     fn set_charging_limit(&mut self, limit: bool) {
         self.charging_limit = Some(limit);
         self.update_battery(self.battery_percent, self.on_battery);
+    }
+
+    /// Best-effort guess at whether we're rendering inside the panel's *overflow*
+    /// popup rather than our own. COSMIC exposes no explicit signal; an overflow
+    /// popup configures us to the panel's suggested applet size, our own popup is
+    /// free-sized. Inexact, but the only signal available.
+    fn in_overflow_popup(&self) -> bool {
+        self.core.applet.suggested_bounds.as_ref().is_some_and(|c| {
+            let suggested_size = self.core.applet.suggested_size(true);
+            let padding = self.core.applet.suggested_padding(true).1;
+            let w = suggested_size.0 + 2 * padding;
+            let h = suggested_size.1 + 2 * padding;
+            c.width as u32 == w as u32 && c.height as u32 == h as u32
+        })
     }
 
     fn panel_icon_name(&self) -> &str {
@@ -401,12 +430,25 @@ impl cosmic::Application for CosmicBatteryApplet {
                     percent,
                     time_to_empty,
                 } => {
+                    let was_on_battery = self.on_battery;
                     self.no_battery = false;
-                    self.update_battery(percent, on_battery);
-                    self.time_remaining = Duration::from_secs(time_to_empty as u64);
+                    self.update_battery(percent, on_battery); // sets self.on_battery
+                    if !on_battery || time_to_empty == 0 {
+                        // charging or no estimate available — nothing meaningful to average
+                        self.time_remaining_samples.clear();
+                        self.time_remaining = Duration::from_secs(0);
+                    } else {
+                        if was_on_battery != on_battery {
+                            // discard stale pre-transition samples
+                            self.time_remaining_samples.clear();
+                        }
+                        self.push_time_remaining(Duration::from_secs(time_to_empty as u64));
+                    }
                 }
                 DeviceDbusEvent::NoBattery => {
                     self.no_battery = true;
+                    self.time_remaining_samples.clear();
+                    self.time_remaining = Duration::from_secs(0);
                 }
             },
             Message::KeyboardBacklight(event) => match event {
@@ -898,17 +940,7 @@ impl cosmic::Application for CosmicBatteryApplet {
                 .into(),
             );
 
-            if gpu.toggled
-                && !self.core.applet.suggested_bounds.as_ref().is_some_and(|c| {
-                    let suggested_size = self.core.applet.suggested_size(true);
-                    let padding = self.core.applet.suggested_padding(true).1;
-                    let w = suggested_size.0 + 2 * padding;
-                    let h = suggested_size.1 + 2 * padding;
-                    // if we have a configure for width and height, we're in a overflow popup
-                    // TODO... we don't exactly have a good way of knowing, unless the size is equal to a suggested size maybe?
-                    c.width as u32 == w as u32 && c.height as u32 == h as u32
-                })
-            {
+            if gpu.toggled && !self.in_overflow_popup() {
                 let app_list = gpu.app_list.as_ref().unwrap();
                 let mut list_apps = Vec::with_capacity(app_list.len());
                 for app in app_list {
@@ -961,7 +993,7 @@ impl cosmic::Application for CosmicBatteryApplet {
             power_profile_subscription(0).map(|event| match event {
                 PowerProfileUpdate::Update { profile } => Message::Profile(profile),
                 PowerProfileUpdate::Init(tx, p) => Message::InitProfile(p, tx),
-                PowerProfileUpdate::Error(e) => Message::Errored(e), // TODO: handle error
+                PowerProfileUpdate::Error(e) => Message::Errored(e), // logged via Message::Errored
             }),
             dgpu_subscription(0).map(|event| match event {
                 GpuUpdate::Init(tx) => Message::GpuInit(tx),
