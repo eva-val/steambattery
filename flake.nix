@@ -36,7 +36,7 @@
             # importCargoLock path mis-handles this one-repo/multi-crate layout).
             # Covers the whole workspace incl. git deps; update when
             # Cargo.lock changes (`nix build` prints the expected hash).
-            cargoHash = "sha256-uWT2rs0JKa/FqdZ4JyFVRNsHUnvV/yQbO1n60uLwECY=";
+            cargoHash = "sha256-zugT6l0AZCiMTpoaK+c4E0pMYmI6WayAQVaR6IEnjZE=";
             nativeBuildInputs = with pkgs; [ pkg-config ];
             buildInputs = [ pkgs.udev ] ++ runtimeLibs pkgs;
           };
