@@ -1,10 +1,11 @@
-# steambattery
+# Steambattery
+![App](assets/panel.jpg)
 
 Battery monitoring for the **Steam Controller 2** ("Triton") on Linux: a
 daemon that reads battery telemetry straight from the controller's HID
-reports, and a COSMIC panel applet that displays it.ck
+reports, and a COSMIC panel applet that displays it.
 
-Supports all 3 connection methods
+Supports all three transports: the puck dongle, direct USB, and Bluetooth LE.
 
 The kernel's `hid-steam` driver doesn't (yet) support the SC2 family, so
 nothing shows up in UPower — this fills the gap in userspace.
@@ -22,8 +23,9 @@ nothing shows up in UPower — this fills the gap in userspace.
 The controller pushes input report `0x43` (`TritonBatteryStatus_t`, from
 SDL3's [`controller_structs.h`]) roughly every 2.5 s while awake — no query
 needed. Units were calibrated against live hardware: voltages in mV, currents
-in mA, temperature in milli-°C. The `0x42` state stream (~266 Hz) doubles as
-a liveness signal; 10 s of silence marks the controller asleep/disconnected.
+in mA, temperature in milli-°C. The controller-state stream (`0x42`, or `0x45`
+over Bluetooth; ~266 Hz) doubles as a liveness signal; 10 s of silence marks
+the controller asleep/disconnected.
 
 Protocol research: [CouchTurtle/sc2-research] and the SDL3 Triton driver.
 
@@ -43,7 +45,8 @@ hardware.steambattery.enable = true;
 
 The module installs:
 
-- a udev rule granting the active seat access to SC2 hidraw nodes (`uaccess`),
+- a udev rule granting local users access to SC2 hidraw nodes (via the
+  `users` group plus `uaccess`),
 - a systemd **user** service running `steambatteryd`,
 - the applet package with its desktop entry.
 
@@ -65,7 +68,9 @@ Session bus name `io.github.steambattery`.
   - `BatteryVoltage`, `SystemVoltage`, `InputVoltage: q` — mV
   - `Current`, `InputCurrent: q` — mA
   - `Temperature: q` — milli-°C
-  - `LastUpdated: t` — unix seconds, 0 = never
+  - `LastUpdated: t` — unix seconds of the last published change, 0 = never
+    (telemetry is deadbanded, so while `Connected` is true the data is live
+    even if this is a little stale)
 
 All properties emit `PropertiesChanged`. Quick check:
 
