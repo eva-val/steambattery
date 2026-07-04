@@ -132,7 +132,11 @@ async fn watch(output: &mut mpsc::Sender<State>) -> zbus::Result<()> {
         .interface("org.freedesktop.DBus.Properties")?
         .path_namespace(ROOT_PATH)?
         .build();
-    let mut props_stream = MessageStream::for_match_rule(props_rule, &conn, Some(32)).await?;
+    // Deep queue: with daemon-side deadbanding, signals are rare and each
+    // one matters (a dropped Connected=false would otherwise show stale
+    // state until the slow fallback below) — make drops implausible even
+    // under a burst.
+    let mut props_stream = MessageStream::for_match_rule(props_rule, &conn, Some(256)).await?;
 
     let dbus_proxy = fdo::DBusProxy::new(&conn).await?;
     let mut name_stream = dbus_proxy
@@ -166,8 +170,9 @@ async fn watch(output: &mut mpsc::Sender<State>) -> zbus::Result<()> {
                 // the proxies so stale pre-restart values aren't served.
                 proxies.clear();
             }
-            // Belt-and-braces against a dropped signal (the match stream's
-            // queue is bounded); rare enough to cost nothing.
+            // Belt-and-braces against a dropped signal; the queue above is
+            // deep enough that this should never be the recovery path, so
+            // it can afford to be slow.
             () = tokio::time::sleep(Duration::from_mins(5)) => {}
         }
     }

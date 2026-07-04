@@ -8,7 +8,7 @@
 //! whose readers died before the suspend.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
@@ -22,6 +22,19 @@ use crate::state::Registry;
 /// (unlike the session bus, whose death legitimately ends the session).
 const RECONNECT_BASE: Duration = Duration::from_secs(5);
 const RECONNECT_CAP: Duration = Duration::from_mins(1);
+
+/// A watch that survived this long was healthy: reset the backoff so a
+/// later, genuine bus restart reconnects in `RECONNECT_BASE`, not at a
+/// lifetime-ratcheted cap. The reconnect gap matters more here than usual —
+/// D-Bus signals are not replayed, so a `PrepareForSleep(false)` fired
+/// while disconnected is lost outright and that resume goes unhandled.
+const HEALTHY_CONNECTION: Duration = Duration::from_mins(1);
+
+/// Consecutive short-lived attempts before concluding logind isn't coming
+/// (no system bus: container, non-systemd) and stopping for good — the
+/// stated degradation is *timer-less* operation, not a connect attempt
+/// every minute forever.
+const MAX_QUICK_FAILURES: u32 = 10;
 
 #[zbus::proxy(
     interface = "org.freedesktop.login1.Manager",
@@ -56,14 +69,27 @@ async fn watch(registry: &Registry, resume_tx: &mpsc::Sender<()>) -> zbus::Resul
     Ok(())
 }
 
-/// Run the watcher forever, reconnecting with backoff. Never returns an
-/// error — suspend awareness is best-effort.
+/// Run the watcher, reconnecting with backoff; a healthy connection resets
+/// the backoff, and a bus that never comes up stops the watcher for good.
+/// Never returns an error — suspend awareness is best-effort.
 pub async fn run(registry: Arc<Registry>, resume_tx: mpsc::Sender<()>) {
     let mut delay = RECONNECT_BASE;
+    let mut quick_failures = 0u32;
     loop {
+        let started = Instant::now();
         match watch(&registry, &resume_tx).await {
             Ok(()) => warn!("logind signal stream ended; reconnecting"),
             Err(e) => warn!(error = %e, "logind watcher failed; retrying"),
+        }
+        if started.elapsed() >= HEALTHY_CONNECTION {
+            delay = RECONNECT_BASE;
+            quick_failures = 0;
+        } else {
+            quick_failures += 1;
+            if quick_failures >= MAX_QUICK_FAILURES {
+                warn!("logind unreachable; running without suspend awareness");
+                return;
+            }
         }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(RECONNECT_CAP);

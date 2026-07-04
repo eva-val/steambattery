@@ -11,7 +11,7 @@ mod state;
 mod suspend;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,38 +25,185 @@ use discovery::{Event, HidrawNode};
 use state::Registry;
 
 /// Backoff for a device whose reader failed (typically a seat-ACL race at
-/// login): 1 s doubling to 30 s, giving up after 6 attempts. udev add/change
-/// events (including logind reapplying ACLs) start the node over, so giving
-/// up never strands a device — it just stops a hopeless timer.
+/// login): 1 s doubling to 30 s for the first `RETRY_FAST_ATTEMPTS`
+/// consecutive failures, then one retry per `RETRY_SLOW` indefinitely. The
+/// slow phase must not stop: logind applies seat ACLs directly via syscalls
+/// with no uevent, so a permissions fix can arrive without any udev event to
+/// restart the node — an event-only recovery path would strand a present
+/// device. One wakeup per 5 min while a present device is broken is the
+/// entire cost.
 const RETRY_BASE: Duration = Duration::from_secs(1);
 const RETRY_CAP: Duration = Duration::from_secs(30);
-const RETRY_MAX_ATTEMPTS: u32 = 6;
+const RETRY_FAST_ATTEMPTS: u32 = 6;
+const RETRY_SLOW: Duration = Duration::from_mins(5);
 
+/// A reader that ran at least this long before failing was healthy: its
+/// failure restarts the backoff at attempt 1 instead of escalating. Only
+/// *consecutive* failures escalate — episodic faults (say, a weekly EIO
+/// burst on a flaky link, each recovered by one retry) must not accumulate
+/// toward the slow phase over the device's lifetime.
+const HEALTHY_RUN: Duration = Duration::from_mins(1);
+
+/// A reader's end report: the generation that spawned it, its node, and how
+/// it ended. Never sent when the task is aborted on unplug — the udev
+/// `Removed` arm already cleans up.
+type Done = (u64, HidrawNode, reader::End);
+
+/// A supervised reader task.
+struct Reader {
+    /// Distinguishes this spawn from earlier ones on the same devnode. Done
+    /// reports are matched against it so a queued report from a dead
+    /// predecessor can't evict a live replacement (and then double it up
+    /// with a retry).
+    generation: u64,
+    /// Consecutive failures before this spawn (0 = clean start).
+    attempt: u32,
+    spawned_at: Instant,
+    task: JoinHandle<()>,
+}
+
+/// A failed devnode scheduled for another attempt.
 struct Retry {
     node: HidrawNode,
+    /// Consecutive failures so far; carried into the respawned reader.
+    attempt: u32,
     at: Instant,
 }
 
-/// The reader reports how it ended over `done_tx` (never sent when the task
-/// is aborted on unplug — the udev `Removed` arm already cleans up).
-fn spawn_reader(
-    node: HidrawNode,
+/// All mutable supervision state, owned by the main select loop. Every path
+/// that starts or stops a reader goes through `adopt`/`forget`/`on_done` so
+/// the readers/retries invariants live in one place instead of being
+/// copy-pasted per select arm.
+struct Supervisor {
     registry: Arc<Registry>,
-    done_tx: mpsc::Sender<(HidrawNode, reader::End)>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let end = reader::run(&node.devnode, &node.key, &node.name, registry).await;
-        let _ = done_tx.send((node, end)).await;
-    })
+    done_tx: mpsc::Sender<Done>,
+    generations: u64,
+    readers: HashMap<PathBuf, Reader>,
+    retries: Vec<Retry>,
+}
+
+impl Supervisor {
+    fn spawn(&mut self, node: HidrawNode, attempt: u32) {
+        self.generations += 1;
+        let generation = self.generations;
+        let registry = self.registry.clone();
+        let done_tx = self.done_tx.clone();
+        let devnode = node.devnode.clone();
+        let task = tokio::spawn(async move {
+            let end = reader::run(&node.devnode, &node.key, &node.name, registry).await;
+            let _ = done_tx.send((generation, node, end)).await;
+        });
+        self.readers.insert(
+            devnode,
+            Reader {
+                generation,
+                attempt,
+                spawned_at: Instant::now(),
+                task,
+            },
+        );
+    }
+
+    /// Fresh evidence the devnode exists (initial scan, udev add/change,
+    /// resume rescan): forget pending retries and start a reader unless a
+    /// live one already owns the devnode.
+    fn adopt(&mut self, node: HidrawNode, reason: &str) {
+        self.retries.retain(|r| r.node.devnode != node.devnode);
+        if self
+            .readers
+            .get(&node.devnode)
+            .is_none_or(|r| r.task.is_finished())
+        {
+            info!(dev = %node.devnode.display(), key = node.key, "{reason}");
+            self.spawn(node, 0);
+        }
+    }
+
+    /// Unplug: drop every trace of the devnode and abort its reader (the
+    /// reader's `ReleaseGuard` drops the registry ref).
+    fn forget(&mut self, devnode: &Path) {
+        self.retries.retain(|r| r.node.devnode != *devnode);
+        if let Some(reader) = self.readers.remove(devnode) {
+            info!(dev = %devnode.display(), "device removed");
+            reader.task.abort();
+        }
+    }
+
+    /// A reader reported its end. Ignored unless `generation` matches the
+    /// tracked reader: a mismatch means the report is from a dead
+    /// predecessor of a replacement `adopt` already spawned (or of a devnode
+    /// `forget` already purged), and acting on it would evict the live
+    /// reader and then duplicate it via retry.
+    fn on_done(&mut self, generation: u64, node: HidrawNode, end: reader::End) {
+        if self
+            .readers
+            .get(&node.devnode)
+            .is_none_or(|r| r.generation != generation)
+        {
+            debug!(dev = %node.devnode.display(), "stale reader report; ignoring");
+            return;
+        }
+        let reader = self
+            .readers
+            .remove(&node.devnode)
+            .expect("generation matched above");
+        match end {
+            reader::End::DeviceGone => {}
+            reader::End::OpenFailed(e) | reader::End::ReadFailed(e) => {
+                let failures = if reader.spawned_at.elapsed() >= HEALTHY_RUN {
+                    1
+                } else {
+                    reader.attempt + 1
+                };
+                let delay = if failures > RETRY_FAST_ATTEMPTS {
+                    warn!(dev = %node.devnode.display(), error = %e,
+                          "reader keeps failing; retrying slowly");
+                    RETRY_SLOW
+                } else {
+                    debug!(dev = %node.devnode.display(), error = %e, failures,
+                           "reader failed; scheduling retry");
+                    (RETRY_BASE * 2u32.pow(failures - 1)).min(RETRY_CAP)
+                };
+                self.retries.push(Retry {
+                    node,
+                    attempt: failures,
+                    at: Instant::now() + delay,
+                });
+            }
+        }
+    }
+
+    /// Earliest scheduled retry; the select loop only arms a timer while
+    /// this is Some — the steady state (everything open or nothing present)
+    /// runs with no timer at all.
+    fn next_retry(&self) -> Option<Instant> {
+        self.retries.iter().map(|r| r.at).min()
+    }
+
+    fn fire_due_retries(&mut self) {
+        let now = Instant::now();
+        let mut i = 0;
+        while i < self.retries.len() {
+            if self.retries[i].at <= now {
+                let retry = self.retries.swap_remove(i);
+                if self
+                    .readers
+                    .get(&retry.node.devnode)
+                    .is_none_or(|r| r.task.is_finished())
+                {
+                    info!(dev = %retry.node.devnode.display(), "retrying device");
+                    self.spawn(retry.node, retry.attempt);
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
 }
 
 // A current-thread runtime is plenty for this workload (a handful of mostly
 // parked tasks) and keeps the daemon to a couple of OS threads instead of
 // one worker per core.
-//
-// One select loop owns all mutable supervision state (readers, retries,
-// attempts); splitting it into functions would only scatter that state.
-#[allow(clippy::too_many_lines)]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -119,112 +266,47 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Readers report their end over this channel; main holds a sender for
-    // spawning, so `recv` never sees a closed channel.
-    let (done_tx, mut done_rx) = mpsc::channel::<(HidrawNode, reader::End)>(16);
+    // Readers report their end over this channel; the supervisor holds a
+    // sender for spawning, so `recv` never sees a closed channel.
+    let (done_tx, mut done_rx) = mpsc::channel::<Done>(16);
+    let mut sup = Supervisor {
+        registry,
+        done_tx,
+        generations: 0,
+        readers: HashMap::new(),
+        retries: Vec::new(),
+    };
 
-    let mut readers: HashMap<PathBuf, JoinHandle<()>> = HashMap::new();
     for node in discovery::scan()? {
-        info!(dev = %node.devnode.display(), key = node.key, "found device");
-        readers.insert(
-            node.devnode.clone(),
-            spawn_reader(node, registry.clone(), done_tx.clone()),
-        );
+        sup.adopt(node, "found device");
     }
-    if readers.is_empty() {
+    if sup.readers.is_empty() {
         info!("no Steam Controller devices present; waiting for hotplug");
     }
 
-    // Failed readers scheduled for another attempt. The retry timer select
-    // arm only exists while this is non-empty — the steady state (everything
-    // open or nothing present) runs with no timer at all; recovery from
-    // open failures is otherwise event-driven via udev add/change.
-    let mut retries: Vec<Retry> = Vec::new();
-    let mut attempts: HashMap<PathBuf, u32> = HashMap::new();
-
     loop {
-        let next_retry = retries.iter().map(|r| r.at).min();
+        let next_retry = sup.next_retry();
         tokio::select! {
-            Some((node, end)) = done_rx.recv() => {
-                // The reader ended on its own; drop its dead handle.
-                readers.remove(&node.devnode);
-                match end {
-                    reader::End::DeviceGone => {
-                        attempts.remove(&node.devnode);
-                    }
-                    reader::End::OpenFailed(e) | reader::End::ReadFailed(e) => {
-                        let attempt = attempts.entry(node.devnode.clone()).or_insert(0);
-                        if *attempt >= RETRY_MAX_ATTEMPTS {
-                            warn!(dev = %node.devnode.display(), error = %e,
-                                  "reader keeps failing; waiting for a udev event");
-                        } else {
-                            let delay = (RETRY_BASE * 2u32.pow(*attempt)).min(RETRY_CAP);
-                            debug!(dev = %node.devnode.display(), error = %e, attempt = *attempt,
-                                   ?delay, "reader failed; scheduling retry");
-                            *attempt += 1;
-                            retries.push(Retry { node, at: Instant::now() + delay });
-                        }
-                    }
-                }
+            Some((generation, node, end)) = done_rx.recv() => {
+                sup.on_done(generation, node, end);
             }
             () = async { tokio::time::sleep_until(next_retry.unwrap()).await },
                 if next_retry.is_some() =>
             {
-                let now = Instant::now();
-                let (due, later): (Vec<_>, Vec<_>) =
-                    std::mem::take(&mut retries).into_iter().partition(|r| r.at <= now);
-                retries = later;
-                for retry in due {
-                    if readers.get(&retry.node.devnode).is_none_or(JoinHandle::is_finished) {
-                        info!(dev = %retry.node.devnode.display(), "retrying device");
-                        readers.insert(
-                            retry.node.devnode.clone(),
-                            spawn_reader(retry.node, registry.clone(), done_tx.clone()),
-                        );
-                    }
-                }
+                sup.fire_due_retries();
             }
             event = event_rx.recv() => match event {
-                Some(Event::Added(node)) => {
-                    // Fresh udev signal: forget past failures and pending
-                    // retries; if no live reader exists, start over now.
-                    attempts.remove(&node.devnode);
-                    retries.retain(|r| r.node.devnode != node.devnode);
-                    if readers.get(&node.devnode).is_none_or(JoinHandle::is_finished) {
-                        info!(dev = %node.devnode.display(), key = node.key, "device added");
-                        readers.insert(
-                            node.devnode.clone(),
-                            spawn_reader(node, registry.clone(), done_tx.clone()),
-                        );
-                    }
-                }
-                Some(Event::Removed(devnode)) => {
-                    attempts.remove(&devnode);
-                    retries.retain(|r| r.node.devnode != devnode);
-                    if let Some(task) = readers.remove(&devnode) {
-                        info!(dev = %devnode.display(), "device removed");
-                        // Abort; the reader's ReleaseGuard drops the registry ref.
-                        task.abort();
-                    }
-                }
+                Some(Event::Added(node)) => sup.adopt(node, "device added"),
+                Some(Event::Removed(devnode)) => sup.forget(&devnode),
                 None => return Err(anyhow::anyhow!("udev monitor thread exited")),
             },
             Some(()) = resume_rx.recv() => {
-                // Readers that died before the suspend (their devnode may
+                // Readers that died around the suspend (their devnode may
                 // have re-enumerated without a udev event we saw) get one
                 // immediate rescan; hotplug events remain the primary path.
-                readers.retain(|_, task| !task.is_finished());
                 match discovery::scan() {
                     Ok(nodes) => for node in nodes {
-                        if !readers.contains_key(&node.devnode) {
-                            info!(dev = %node.devnode.display(), key = node.key, "device found after resume");
-                            attempts.remove(&node.devnode);
-                            retries.retain(|r| r.node.devnode != node.devnode);
-                            readers.insert(
-                                node.devnode.clone(),
-                                spawn_reader(node, registry.clone(), done_tx.clone()),
-                            );
-                        }
+                        sup.adopt(node, "device found after resume");
                     },
                     Err(e) => error!(error = %e, "post-resume rescan failed"),
                 }

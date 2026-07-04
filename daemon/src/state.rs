@@ -21,12 +21,22 @@ use crate::protocol::BatteryStatus;
 pub const STALE_AFTER: Duration = Duration::from_secs(10);
 
 /// How long after resume a device may stay silent before being swept. Must
-/// cover the reader's re-mark latency (1 s mark throttle + 200 ms drain
-/// sleep) so a controller that survived suspend never flaps; a controller
-/// that died during sleep is reported disconnected this soon after resume
-/// instead of `STALE_AFTER` later (the monotonic clock freezes in suspend,
-/// so its `last_seen` still looks fresh).
+/// cover the reader's re-mark latency so a controller that survived suspend
+/// never flaps; a controller that died during sleep is reported disconnected
+/// this soon after resume instead of `STALE_AFTER` later (the monotonic
+/// clock freezes in suspend, so its `last_seen` still looks fresh).
 const RESUME_GRACE: Duration = Duration::from_secs(2);
+
+// The re-mark latency invariant, enforced at compile time: the monotonic
+// clock freeze keeps the reader's pre-suspend mark-throttle window alive
+// across the gap, so the first post-resume mark can lag up to MARK_INTERVAL
+// plus one DRAIN_SLEEP; add 500 ms of scheduling margin. If this fires,
+// whoever retuned the reader constants must grow RESUME_GRACE with them or
+// every resume will flap live wired/dongle controllers to disconnected.
+const _: () = assert!(
+    RESUME_GRACE.as_millis()
+        >= crate::reader::MARK_INTERVAL.as_millis() + crate::reader::DRAIN_SLEEP.as_millis() + 500
+);
 
 /// Publish deadbands for the analog telemetry fields, applied against the
 /// last *published* value — publishing re-anchors the reference, which gives
@@ -62,7 +72,10 @@ pub struct DeviceSnapshot {
     /// Last *published* battery report (deadbanded — see [`significant`]);
     /// retained (stale) while disconnected.
     pub battery: Option<BatteryStatus>,
-    /// Wall-clock time of the last published battery change.
+    /// Wall-clock time of the last published battery change; re-stamped by
+    /// [`Registry::sweep`] when the device goes stale, so for a disconnected
+    /// device it reads as "retained values current as of" (stable telemetry
+    /// can hold the last deadband crossing hours before the disconnect).
     pub last_updated: Option<SystemTime>,
 }
 
@@ -229,6 +242,13 @@ impl Registry {
             if entry.snapshot.connected && entry.last_seen.is_none_or(|t| t.elapsed() > STALE_AFTER)
             {
                 entry.snapshot.connected = false;
+                // Stamp the disconnect: the retained values were live until
+                // now, not until the last deadband crossing (which stable
+                // telemetry can hold hours in the past) — clients render
+                // this as the age of the last-known data.
+                if entry.snapshot.battery.is_some() {
+                    entry.snapshot.last_updated = Some(SystemTime::now());
+                }
                 changed = true;
             }
         }
@@ -411,5 +431,28 @@ mod tests {
         // Fresh traffic after resume restores the full window.
         r.mark_traffic("k");
         assert!(r.next_deadline().unwrap() > now + RESUME_GRACE);
+    }
+
+    /// Going stale re-stamps `last_updated`: the retained values were live
+    /// until the disconnect, not until the last deadband crossing.
+    #[test]
+    fn sweep_stamps_disconnect_time() {
+        let r = Registry::new();
+        let mut rx = r.subscribe();
+        r.acquire("k", "dev");
+        r.update_battery("k", battery(80));
+        rx.borrow_and_update();
+
+        let old = SystemTime::now() - Duration::from_hours(1);
+        {
+            let mut inner = r.inner.lock().unwrap();
+            let entry = inner.get_mut("k").unwrap();
+            entry.snapshot.last_updated = Some(old);
+            entry.last_seen = None;
+        }
+        r.sweep();
+        let snap = rx.borrow();
+        assert!(!snap[0].connected);
+        assert!(snap[0].last_updated.unwrap() > old);
     }
 }

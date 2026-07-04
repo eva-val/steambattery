@@ -151,9 +151,12 @@ pub fn monitor_blocking(tx: mpsc::Sender<Event>) -> Result<()> {
         }
         for event in socket.iter() {
             let out = match event.event_type() {
-                // `Change` fires when logind (re)applies seat ACLs — treat it
-                // like an add so a node that failed to open recovers on the
-                // event instead of needing a polling rescan.
+                // Treat `Change` like an add so a node that failed to open
+                // can recover on the event (e.g. a `udevadm trigger` or an
+                // attribute rewrite). Not every recovery emits one, though:
+                // logind applies seat ACLs directly via syscalls with no
+                // uevent, which is why the supervisor also keeps a slow
+                // retry (see main.rs) instead of relying on events alone.
                 udev::EventType::Add | udev::EventType::Change => {
                     classify(&event.device()).map(Event::Added)
                 }

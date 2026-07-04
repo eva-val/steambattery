@@ -158,11 +158,11 @@ impl Window {
                 "Temperature",
                 format!("{:.1} °C", f32::from(dev.temperature) / 1000.0),
             );
-            // The daemon deadbands telemetry, so LastUpdated marks the last
-            // meaningful change, not the last report. While connected the
-            // staleness window already guarantees the data is current — an
-            // "N min ago" there would just read as broken. Age only matters
-            // for a disconnected controller's retained last-known values.
+            // While connected the staleness window guarantees the data is
+            // current — an "N min ago" there would just read as broken. For
+            // a disconnected controller the daemon re-stamps LastUpdated at
+            // the disconnect, so the age below is how long ago the retained
+            // values were last known good.
             if dev.connected {
                 detail("Updated", "live".to_string());
             } else if dev.last_updated > 0 {

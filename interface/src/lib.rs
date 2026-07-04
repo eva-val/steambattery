@@ -130,7 +130,9 @@ pub trait Device {
     /// Unix seconds of the last *published* battery change; 0 = never.
     /// Telemetry is deadbanded daemon-side, so this only advances when a
     /// value moved meaningfully — while `Connected` is true the data is
-    /// live even if this is minutes old.
+    /// live even if this is minutes old. The daemon re-stamps it when
+    /// `Connected` flips false, so for a disconnected device it is the
+    /// moment the retained values were last known good.
     #[zbus(property)]
     fn last_updated(&self) -> zbus::Result<u64>;
 }

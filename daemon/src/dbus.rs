@@ -116,6 +116,8 @@ impl Device {
     /// Unix seconds of the last *published* battery change (registry
     /// deadbanding suppresses jitter-only reports); 0 = never. While
     /// `Connected` is true the data is live even if this is minutes old.
+    /// Re-stamped when the device goes stale, so for a disconnected device
+    /// it is the moment the retained values were last known good.
     #[zbus(property)]
     fn last_updated(&self) -> u64 {
         last_updated_secs(&self.snapshot)

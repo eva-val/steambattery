@@ -23,7 +23,9 @@ const BUF_LEN: usize = 64;
 /// open fd and drops the NEWEST on overflow, so at the 266 Hz liveness rate
 /// the queue covers ~237 ms — 200 ms batches ~53 reports per wakeup without
 /// losing anything, cutting the reader from ~266 wakeups/s to ~5/s.
-const DRAIN_SLEEP: Duration = Duration::from_millis(200);
+/// `pub`: `state::RESUME_GRACE` must cover this plus `MARK_INTERVAL`
+/// (const-asserted there).
+pub const DRAIN_SLEEP: Duration = Duration::from_millis(200);
 
 /// Transient read errors (e.g. an EIO hiccup on a flaky BLE link) tolerated
 /// before the reader gives up; a successful read resets the count. Giving up
@@ -35,7 +37,9 @@ const MAX_CONSECUTIVE_ERRORS: u32 = 5;
 /// Liveness reports arrive at ~266 Hz but their only consumer is the 10 s
 /// staleness window sampled every 2 s — throttle registry marks so the
 /// shared lock isn't taken hundreds of times per second.
-const MARK_INTERVAL: Duration = Duration::from_secs(1);
+/// `pub`: `state::RESUME_GRACE` must cover this plus `DRAIN_SLEEP`
+/// (const-asserted there).
+pub const MARK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Why a reader stopped — the supervisor retries failures (with backoff)
 /// but not clean unplugs.
