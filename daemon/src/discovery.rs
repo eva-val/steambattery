@@ -151,7 +151,12 @@ pub fn monitor_blocking(tx: mpsc::Sender<Event>) -> Result<()> {
         }
         for event in socket.iter() {
             let out = match event.event_type() {
-                udev::EventType::Add => classify(&event.device()).map(Event::Added),
+                // `Change` fires when logind (re)applies seat ACLs — treat it
+                // like an add so a node that failed to open recovers on the
+                // event instead of needing a polling rescan.
+                udev::EventType::Add | udev::EventType::Change => {
+                    classify(&event.device()).map(Event::Added)
+                }
                 udev::EventType::Remove => event
                     .device()
                     .devnode()

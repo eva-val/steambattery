@@ -18,3 +18,4 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 libc.workspace = true
 udev.workspace = true
+futures-util.workspace = true
