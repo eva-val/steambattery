@@ -2,7 +2,9 @@
 
 Battery monitoring for the **Steam Controller 2** ("Triton") on Linux: a
 daemon that reads battery telemetry straight from the controller's HID
-reports, and a COSMIC panel applet that displays it.
+reports, and a COSMIC panel applet that displays it.ck
+
+Supports all 3 connection methods
 
 The kernel's `hid-steam` driver doesn't (yet) support the SC2 family, so
 nothing shows up in UPower — this fills the gap in userspace.

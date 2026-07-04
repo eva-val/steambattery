@@ -4,11 +4,15 @@ use cosmic::app::Core;
 use cosmic::applet::cosmic_panel_config::PanelAnchor;
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
 use cosmic::iced::widget::{column, row};
-use cosmic::iced::{Alignment, Subscription, window};
+use cosmic::iced::{Alignment, Length, Subscription, window};
 use cosmic::widget::{button, container, divider, icon, text};
 use cosmic::{Element, Task, theme};
 
 use crate::dbus::{self, ChargeState, DeviceInfo, State};
+
+/// Themed gamepad glyph used as the panel identity. Loaded from the active
+/// icon theme at runtime, so it adapts per system.
+const GAMEPAD_ICON: &str = "input-gaming-symbolic";
 
 pub fn run() -> cosmic::iced::Result {
     cosmic::applet::run::<Window>(())
@@ -42,7 +46,9 @@ impl Window {
             .or_else(|| devices.iter().find(|d| d.has_battery_data()))
     }
 
-    fn panel_icon(&self) -> String {
+    /// Name of the stock `battery-level-*` glyph for the current state; used as
+    /// the corner badge on the gamepad (and as a standalone fallback).
+    fn battery_icon(&self) -> String {
         let Some(dev) = self.primary() else {
             return "battery-missing-symbolic".to_string();
         };
@@ -57,12 +63,65 @@ impl Window {
         format!("battery-level-{level}{suffix}-symbolic")
     }
 
+    /// Panel glyph: the themed gamepad, dimmed to a watermark, with the battery
+    /// state stacked as a badge in the bottom-right corner. Both layers are
+    /// themed symbolic icons — nothing is bundled. Separation is by opacity, not
+    /// colour: COSMIC recolours every symbolic icon to the one panel foreground,
+    /// so two solid layers would merge into each other. Dimming the base is the
+    /// same trick Adwaita's own multi-layer symbolic icons use.
+    fn panel_glyph(&self, size: u16) -> Element<'_, Message> {
+        let sf = f32::from(size);
+        let base: Element<'_, Message> = icon::from_name(GAMEPAD_ICON)
+            .icon()
+            .into_svg_handle()
+            .map_or_else(
+                // Theme ships the gamepad only as a raster: fall back to a solid icon.
+                || {
+                    icon::from_name(GAMEPAD_ICON)
+                        .size(size)
+                        .symbolic(true)
+                        .into()
+                },
+                |handle| {
+                    cosmic::widget::Svg::new(handle)
+                        .symbolic(true)
+                        .opacity(0.34_f32)
+                        .width(Length::Fixed(sf))
+                        .height(Length::Fixed(sf))
+                        .into()
+                },
+            );
+
+        // ~56% of the icon box, floored, but never so small it's illegible.
+        let badge_px = (size.saturating_mul(56) / 100).max(8);
+        let badge = container(
+            icon::from_name(self.battery_icon())
+                .size(badge_px)
+                .symbolic(true),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::End)
+        .align_y(Alignment::End);
+
+        // Pin the stack to the full icon box so `autosize_window` still sizes the
+        // panel slot from `size`, even though the badge only fills a corner.
+        cosmic::iced::widget::Stack::new()
+            .push(base)
+            .push(badge)
+            .width(Length::Fixed(sf))
+            .height(Length::Fixed(sf))
+            .into()
+    }
+
     fn device_details<'a>(dev: &'a DeviceInfo) -> Element<'a, Message> {
+        // The name (e.g. "Steam Controller (puck slot 0)") can be wide; let it
+        // take the remaining width and wrap rather than pushing the popup out.
         let title = row![
-            text::title4(&dev.name),
-            cosmic::widget::space::horizontal(),
+            text::title4(&dev.name).width(Length::Fill),
             text::title4(dev.level_label()),
         ]
+        .spacing(8)
         .align_y(Alignment::Center);
 
         let status = if dev.connected {
@@ -122,10 +181,18 @@ impl Window {
 }
 
 impl cosmic::Application for Window {
-    type Message = Message;
     type Executor = cosmic::SingleThreadExecutor;
     type Flags = ();
+    type Message = Message;
     const APP_ID: &'static str = "io.github.steambattery.Applet";
+
+    fn core(&self) -> &Core {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut Core {
+        &mut self.core
+    }
 
     fn init(core: Core, (): Self::Flags) -> (Self, Task<cosmic::Action<Message>>) {
         (
@@ -138,16 +205,8 @@ impl cosmic::Application for Window {
         )
     }
 
-    fn core(&self) -> &Core {
-        &self.core
-    }
-
-    fn core_mut(&mut self) -> &mut Core {
-        &mut self.core
-    }
-
-    fn style(&self) -> Option<cosmic::iced::theme::Style> {
-        Some(cosmic::applet::style())
+    fn on_close_requested(&self, id: window::Id) -> Option<Message> {
+        Some(Message::CloseRequested(id))
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -199,12 +258,7 @@ impl cosmic::Application for Window {
         let suggested = self.core.applet.suggested_size(true);
         let padding = self.core.applet.suggested_padding(true);
 
-        let mut children: Vec<Element<'_, Message>> = vec![
-            icon::from_name(self.panel_icon())
-                .size(suggested.0)
-                .symbolic(true)
-                .into(),
-        ];
+        let mut children: Vec<Element<'_, Message>> = vec![self.panel_glyph(suggested.0)];
         if let Some(dev) = self.primary() {
             children.push(
                 self.core
@@ -265,13 +319,20 @@ impl cosmic::Application for Window {
             },
         );
 
+        // A fixed content width bounds the title/detail rows so long names wrap
+        // and the label/value pairs justify left/right instead of the popup
+        // autosizing to whatever the widest string happens to be.
         self.core
             .applet
-            .popup_container(container(content).padding([spacing.space_s, spacing.space_m]))
+            .popup_container(
+                container(content)
+                    .width(Length::Fixed(320.0))
+                    .padding([spacing.space_s, spacing.space_m]),
+            )
             .into()
     }
 
-    fn on_close_requested(&self, id: window::Id) -> Option<Message> {
-        Some(Message::CloseRequested(id))
+    fn style(&self) -> Option<cosmic::iced::theme::Style> {
+        Some(cosmic::applet::style())
     }
 }
