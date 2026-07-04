@@ -32,7 +32,7 @@ const RESUME_GRACE: Duration = Duration::from_secs(2);
 /// last *published* value — publishing re-anchors the reference, which gives
 /// inherent hysteresis (no flapping at a threshold) while slow drift still
 /// accumulates to a publish. Raw reports jitter by a few LSB; without a
-/// deadband every 2.5 s battery report emits PropertiesChanged and wakes the
+/// deadband every 2.5 s battery report emits `PropertiesChanged` and wakes the
 /// applet. `level` and `charge_state` always publish exactly.
 const DEADBAND_MV: u16 = 15;
 const DEADBAND_MA: u16 = 10;
@@ -122,7 +122,12 @@ impl Registry {
     /// flaps, a dead one is swept promptly instead of `STALE_AFTER` later.
     pub fn note_resume(&self) {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(cutoff) = Instant::now().checked_sub(STALE_AFTER - RESUME_GRACE) {
+        // now - STALE_AFTER + RESUME_GRACE, ordered to stay in checked land
+        // (checked_sub can fail within the first STALE_AFTER of boot).
+        if let Some(cutoff) = Instant::now()
+            .checked_sub(STALE_AFTER)
+            .map(|t| t + RESUME_GRACE)
+        {
             for entry in inner.values_mut() {
                 if entry.snapshot.connected {
                     entry.last_seen = Some(entry.last_seen.map_or(cutoff, |t| t.min(cutoff)));

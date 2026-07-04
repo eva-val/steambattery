@@ -370,14 +370,14 @@ impl cosmic::Application for CosmicBatteryApplet {
             Message::SetChargingLimit(enable) => {
                 self.set_charging_limit(enable);
 
-                if enable {
-                    return cosmic::iced::Task::perform(set_charging_limit(), |_| {
+                return if enable {
+                    cosmic::iced::Task::perform(set_charging_limit(), |_| {
                         cosmic::Action::None
-                    });
+                    })
                 } else {
-                    return cosmic::iced::Task::perform(unset_charging_limit(), |_| {
+                    cosmic::iced::Task::perform(unset_charging_limit(), |_| {
                         cosmic::Action::None
-                    });
+                    })
                 }
             }
             Message::Errored(why) => {
@@ -387,8 +387,8 @@ impl cosmic::Application for CosmicBatteryApplet {
                 self.dragging_kbd_brightness = false;
                 self.dragging_screen_brightness = false;
 
-                if let Some(p) = self.popup.take() {
-                    return destroy_popup(p);
+                return if let Some(p) = self.popup.take() {
+                    destroy_popup(p)
                 } else {
                     if let Some(tx) = &self.kbd_sender {
                         let _ = tx.send(KeyboardBacklightRequest::Get);
@@ -421,7 +421,7 @@ impl cosmic::Application for CosmicBatteryApplet {
                             cosmic::Action::App(Message::InitChargingLimit(limit.ok()))
                         }));
                     }
-                    return Task::batch(tasks);
+                    Task::batch(tasks)
                 }
             }
             Message::UpowerDevice(event) => match event {
