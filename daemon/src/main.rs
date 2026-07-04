@@ -24,8 +24,11 @@ use state::Registry;
 
 fn spawn_reader(node: HidrawNode, registry: Arc<Registry>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = reader::run(&node.devnode, &node.key, &node.name, registry).await {
-            error!(dev = %node.devnode.display(), error = %e, "reader failed");
+        match reader::run(&node.devnode, &node.key, &node.name, registry).await {
+            reader::End::DeviceGone => {}
+            reader::End::OpenFailed(e) | reader::End::ReadFailed(e) => {
+                error!(dev = %node.devnode.display(), error = %e, "reader failed");
+            }
         }
     })
 }
