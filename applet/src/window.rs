@@ -158,7 +158,14 @@ impl Window {
                 "Temperature",
                 format!("{:.1} °C", f32::from(dev.temperature) / 1000.0),
             );
-            if dev.last_updated > 0 {
+            // The daemon deadbands telemetry, so LastUpdated marks the last
+            // meaningful change, not the last report. While connected the
+            // staleness window already guarantees the data is current — an
+            // "N min ago" there would just read as broken. Age only matters
+            // for a disconnected controller's retained last-known values.
+            if dev.connected {
+                detail("Updated", "live".to_string());
+            } else if dev.last_updated > 0 {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |d| d.as_secs());

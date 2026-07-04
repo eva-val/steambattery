@@ -127,7 +127,10 @@ pub trait Device {
     #[zbus(property)]
     fn temperature(&self) -> zbus::Result<u16>;
 
-    /// Unix seconds of the last battery report; 0 = never.
+    /// Unix seconds of the last *published* battery change; 0 = never.
+    /// Telemetry is deadbanded daemon-side, so this only advances when a
+    /// value moved meaningfully — while `Connected` is true the data is
+    /// live even if this is minutes old.
     #[zbus(property)]
     fn last_updated(&self) -> zbus::Result<u64>;
 }

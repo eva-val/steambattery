@@ -113,7 +113,9 @@ impl Device {
         self.battery().map_or(0, |b| b.temperature)
     }
 
-    /// Unix seconds of the last battery report; 0 = never.
+    /// Unix seconds of the last *published* battery change (registry
+    /// deadbanding suppresses jitter-only reports); 0 = never. While
+    /// `Connected` is true the data is live even if this is minutes old.
     #[zbus(property)]
     fn last_updated(&self) -> u64 {
         last_updated_secs(&self.snapshot)

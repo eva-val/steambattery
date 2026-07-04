@@ -121,7 +121,7 @@ async fn fetch_state(
 }
 
 /// Watch the daemon: refetch on any `PropertiesChanged` under our namespace,
-/// on daemon start/stop, and every 30 s as a fallback.
+/// on daemon start/stop, and every 5 min as a fallback.
 async fn watch(output: &mut mpsc::Sender<State>) -> zbus::Result<()> {
     let conn = zbus::Connection::session().await?;
     let daemon = DaemonProxy::new(&conn).await?;
@@ -166,7 +166,9 @@ async fn watch(output: &mut mpsc::Sender<State>) -> zbus::Result<()> {
                 // the proxies so stale pre-restart values aren't served.
                 proxies.clear();
             }
-            () = tokio::time::sleep(Duration::from_secs(30)) => {}
+            // Belt-and-braces against a dropped signal (the match stream's
+            // queue is bounded); rare enough to cost nothing.
+            () = tokio::time::sleep(Duration::from_mins(5)) => {}
         }
     }
 }
